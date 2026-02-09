@@ -293,5 +293,5 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 **Author:** TadMSTR  
 **Repository:** https://github.com/TadMSTR/docker-stack-backup  
-**Last Updated:** 2024-12-03
+**Last Updated:** 2026-02-08
 
