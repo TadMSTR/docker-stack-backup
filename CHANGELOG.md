@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.3.0] — 2026-06-19
+
+### Added
+
+- **Matrix notification support** — `MATRIX_ENABLED`, `MATRIX_HOMESERVER`, `MATRIX_ACCESS_TOKEN`,
+  `MATRIX_ROOM_ID` env vars; sends formatted backup summaries to a Matrix room via the
+  client/v3 REST API. `python3` used for URL encoding with a sed-based fallback.
+- **`lib.sh`** — shared library sourced by all scripts; contains color vars, logging helpers,
+  locking (`acquire_lock` / `release_lock`), compression helpers, notification functions
+  (`send_ntfy`, `send_pushover`, `send_email`, `send_matrix`, `send_notifications`),
+  restart logic, and `find_compose_file`.
+- **`config.example.sh`** — documents all user-configurable variables with defaults; copy to
+  `config.sh` to configure without editing scripts directly. `config.sh` is git-ignored.
+- **`.gitignore`** — excludes `config.sh` to prevent credentials from being committed.
+- **`find_compose_file()`** in `lib.sh` — returns the first compose file found in a stack
+  directory, checking `docker-compose.yml`, `docker-compose.yaml`, `compose.yml`, `compose.yaml`.
+
+### Changed
+
+- All four scripts (`docker-stack-backup.sh`, `docker-stack-restore.sh`,
+  `docker-stack-backup-manual.sh`, `backup-verify.sh`) now source `lib.sh` and optionally
+  source `config.sh`; duplicate code removed.
+- `docker-stack-backup-manual.sh`: all hardcoded `$stack_path/docker-compose.yml` references
+  replaced with `find_compose_file()` — stacks using `compose.yml` or `compose.yaml` now work.
+- SC2155 (`local var=$(cmd)`) fixed across all scripts — declarations and assignments split
+  to preserve exit code capture.
+- `.shellcheckrc`: removed global `disable=SC2155` suppression (now fixed at source).
+
+---
+
+## [0.2.1] — 2026-06-19
+
+### Fixed
+
+- `backup-verify.sh`: `((n++))` counter arithmetic caused the script to exit prematurely
+  under `set -euo pipefail` when the counter value was 0. Replaced with `n=$((n+1))`.
+- `backup-verify.sh`, `docker-stack-restore.sh`: hardcoded `.tar.gz` extension in glob
+  patterns and `tar -tzf`/`-xzf` flags broke verification and restore of archives created
+  with bzip2, xz, or zstd compression. Now uses `find \( -name "*.tar.*" -o -name "*.tar" \)`,
+  `*.tar.* *.tar` loop globs, and `tar -tf`/`-xf` (GNU tar auto-detects format).
+- `backup-verify.sh`: `basename "$file" .tar.gz` failed to strip extensions other than `.tar.gz`.
+  Fixed with chained `${name%.tar.*}` / `${name%.tar}` parameter expansion.
+- `docker-stack-restore.sh`: `select_stack()` used a single `stacks` array indexed by loop
+  variable `i`, losing the path-to-file mapping. Refactored to use parallel `stacks`/`stack_files`
+  arrays for correct file selection.
+- `docker-stack-backup.sh`: removed stray debug `echo` statement that emitted
+  `DEBUG: simulate_backup_stack returned success` to stderr on every successful dry-run.
+
+---
+
 ## [0.2.0] — 2026-06-19
 
 ### Fixed
