@@ -188,7 +188,7 @@ select_timestamp() {
         local time_part="${timestamp#*_}"
         local formatted_date=$(date -d "${date_part:0:4}-${date_part:4:2}-${date_part:6:2}" +"%B %d, %Y" 2>/dev/null || echo "$date_part")
         local formatted_time="${time_part:0:2}:${time_part:2:2}:${time_part:4:2}"
-        local stack_count=$(find "$host_dir/$timestamp" -name "*.tar.gz" | wc -l)
+        local stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l)
         
         echo -e "  ${GREEN}$i)${NC} $formatted_date at $formatted_time (${stack_count} stacks)"
         ((i++))
@@ -214,37 +214,40 @@ select_stack() {
     
     local backup_dir="$BACKUP_BASE/$selected_hostname/$selected_timestamp"
     local -a stacks
+    local -a stack_files
     local i=1
-    
-    for backup_file in "$backup_dir"/*.tar.gz; do
+
+    for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
         if [[ -f "$backup_file" ]]; then
-            local stack_name=$(basename "$backup_file" .tar.gz)
+            local fname; fname=$(basename "$backup_file")
+            local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
             stacks+=("$stack_name")
+            stack_files+=("$backup_file")
         fi
     done
-    
+
     if [[ ${#stacks[@]} -eq 0 ]]; then
         log_error "No stack backups found"
         exit 1
     fi
-    
+
     echo "Available stacks:"
     for stack in "${stacks[@]}"; do
-        local size=$(du -h "$backup_dir/${stack}.tar.gz" | cut -f1)
+        local size=$(du -h "${stack_files[$((i-1))]}" | cut -f1)
         echo -e "  ${GREEN}$i)${NC} $stack (${size})"
         ((i++))
     done
-    
+
     echo ""
     local selection=$(prompt_input "Select stack number" "1")
-    
+
     if [[ ! "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -gt ${#stacks[@]} ]]; then
         log_error "Invalid selection"
         exit 1
     fi
-    
+
     selected_stack="${stacks[$((selection-1))]}"
-    selected_backup_file="$backup_dir/${selected_stack}.tar.gz"
+    selected_backup_file="${stack_files[$((selection-1))]}"
     echo -e "\n${GREEN}✓${NC} Selected stack: ${BOLD}$selected_stack${NC}"
 }
 
@@ -256,9 +259,9 @@ preview_backup() {
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
-    tar -tzf "$selected_backup_file" | head -20
-    
-    local total_files=$(tar -tzf "$selected_backup_file" | wc -l)
+    tar -tf "$selected_backup_file" | head -20
+
+    local total_files=$(tar -tf "$selected_backup_file" | wc -l)
     if [[ $total_files -gt 20 ]]; then
         echo -e "${YELLOW}... and $((total_files - 20)) more files${NC}"
     fi
@@ -369,7 +372,7 @@ perform_restore() {
     
     # Extract backup to temp directory
     log "Extracting backup..."
-    tar -xzf "$selected_backup_file" -C "$temp_restore"
+    tar -xf "$selected_backup_file" -C "$temp_restore"
     
     # Restore compose files
     log "Restoring stack configuration..."

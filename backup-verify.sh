@@ -90,14 +90,15 @@ list_backups() {
             fi
             
             local timestamp=$(basename "$backup_dir")
-            local backup_count=$(find "$backup_dir" -name "*.tar.gz" | wc -l)
+            local backup_count=$(find "$backup_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l)
             local total_size=$(du -sh "$backup_dir" | cut -f1)
             
             echo "  $timestamp - $backup_count stacks - $total_size"
             
-            for backup_file in "$backup_dir"/*.tar.gz; do
+            for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
                 if [[ -f "$backup_file" ]]; then
-                    local stack_name=$(basename "$backup_file" .tar.gz)
+                    local fname; fname=$(basename "$backup_file")
+                    local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
                     local file_size=$(du -sh "$backup_file" | cut -f1)
                     echo "    - $stack_name ($file_size)"
                 fi
@@ -129,21 +130,21 @@ verify_backups() {
         
         echo -e "${GREEN}Verifying: $hostname${NC}"
         
-        for backup_file in "$host_dir"/*/*.tar.gz; do
+        for backup_file in "$host_dir"/*/*.tar.* "$host_dir"/*/*.tar; do
             if [[ ! -f "$backup_file" ]]; then
                 continue
             fi
             
-            ((total_checked++))
+            total_checked=$((total_checked + 1))
             
             local relative_path="${backup_file#$BACKUP_BASE/}"
             
-            if tar -tzf "$backup_file" &>/dev/null; then
+            if tar -tf "$backup_file" &>/dev/null; then
                 echo -e "  ${GREEN}✓${NC} $relative_path"
-                ((total_valid++))
+                total_valid=$((total_valid + 1))
             else
                 echo -e "  ${RED}✗${NC} $relative_path"
-                ((total_invalid++))
+                total_invalid=$((total_invalid + 1))
             fi
         done
         echo
@@ -172,11 +173,11 @@ show_stats() {
         fi
         
         local backup_sets=$(find "$host_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)
-        local total_backups=$(find "$host_dir" -name "*.tar.gz" | wc -l)
+        local total_backups=$(find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l)
         local total_size=$(du -sh "$host_dir" 2>/dev/null | cut -f1)
         
-        local oldest_backup=$(find "$host_dir" -name "*.tar.gz" -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f1)
-        local newest_backup=$(find "$host_dir" -name "*.tar.gz" -printf '%T+ %p\n' 2>/dev/null | sort | tail -1 | cut -d' ' -f1)
+        local oldest_backup=$(find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f1)
+        local newest_backup=$(find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T+ %p\n' 2>/dev/null | sort | tail -1 | cut -d' ' -f1)
         
         echo -e "${GREEN}$hostname${NC}"
         echo "  Backup sets: $backup_sets"
