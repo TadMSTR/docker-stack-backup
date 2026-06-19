@@ -9,7 +9,7 @@ A comprehensive backup and restore solution for Docker Compose stacks managed by
 - ✅ **Automated Backups** - Schedule regular backups via cron
 - 🎯 **Manual Selection** - Interactive mode to select specific stacks
 - 🔄 **Smart Restore** - Interactive wizard with conflict detection
-- 📱 **Notifications** - Ntfy, Pushover, and Email support
+- 📱 **Notifications** - Ntfy, Pushover, Email, and Matrix support
 - 🛡️ **Safe Operations** - Preserves container run states
 - 📊 **Detailed Logging** - Comprehensive audit trail
 - 🔍 **Backup Verification** - Tools to verify backup integrity
@@ -36,10 +36,16 @@ cd docker-stack-backup
 
 ### 2. Configure the Scripts
 
-Edit the configuration section in each script:
+Copy `config.example.sh` to `config.sh` and edit it:
 
 ```bash
-# Main paths
+cp config.example.sh config.sh
+$EDITOR config.sh
+```
+
+`config.sh` is git-ignored — your credentials and local paths stay off the repo. At minimum configure the main paths:
+
+```bash
 DOCKHAND_BASE="/path/to/dockhand"
 APPDATA_PATH="/mnt/datastor/appdata"
 BACKUP_DEST="/mnt/backup/docker-backups"
@@ -72,7 +78,7 @@ sudo docker-stack-backup-manual.sh
 ## Documentation
 
 - **[Installation & Usage Guide](USAGE.md)** - Detailed setup and usage instructions
-- **[Notification Setup](NOTIFICATIONS.md)** - Configure Ntfy, Pushover, or Email alerts
+- **[Notification Setup](NOTIFICATIONS.md)** - Configure Ntfy, Pushover, Email, or Matrix alerts
 
 ## Requirements
 
@@ -82,6 +88,7 @@ sudo docker-stack-backup-manual.sh
 - Dockhand for stack management
 - `curl` for notifications (optional)
 - `sendmail` or SMTP access for email (optional)
+- `python3` for Matrix room ID URL encoding (optional; sed fallback used if absent)
 - `bats` for running tests: `apt install bats` (optional)
 
 ## Architecture
@@ -188,7 +195,7 @@ SEARCH_DEPTH=1 cleanup-old-backups.sh
 
 ### Notification Setup
 
-Configure notifications in `docker-stack-backup.sh`:
+Configure notifications in `config.sh` (copy from `config.example.sh`):
 
 ```bash
 # Enable/disable notifications
@@ -209,6 +216,12 @@ EMAIL_TO="you@protonmail.com"
 SMTP_SERVER="127.0.0.1"
 SMTP_PORT="1025"
 SMTP_INSECURE=true
+
+# Matrix
+MATRIX_ENABLED=false
+MATRIX_HOMESERVER="https://matrix.example.com"
+MATRIX_ACCESS_TOKEN="syt_yourtoken"
+MATRIX_ROOM_ID="!roomid:matrix.example.com"
 ```
 
 See [NOTIFICATIONS.md](NOTIFICATIONS.md) for detailed setup.
