@@ -80,6 +80,7 @@ log_warning() {
 # Requires: LOCK_FILE, LOCK_FD to be set by caller
 #######################################
 acquire_lock() {
+    [[ "${LOCK_FD:-200}" =~ ^[0-9]+$ ]] || LOCK_FD=200
     eval "exec ${LOCK_FD:=200}>${LOCK_FILE:=/var/run/docker-stack-backup.lock}"
 
     if ! flock -n $LOCK_FD; then
@@ -336,12 +337,24 @@ send_matrix() {
         encoded_room=$(printf '%s' "$MATRIX_ROOM_ID" | sed 's/!/%21/g; s/:/%3A/g')
     fi
 
-    local body_text="${title}\n\n${message}"
+    local body_text="${title}"$'\n\n'"${message}"
     local body_html="<b>${title}</b><br><pre>${message}</pre>"
     local payload
-    payload=$(printf '{"msgtype":"m.text","body":"%s","format":"org.matrix.custom.html","formatted_body":"%s"}' \
-        "$(printf '%s' "$body_text" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')" \
-        "$(printf '%s' "$body_html" | sed 's/\\/\\\\/g; s/"/\\"/g')")
+    if command -v python3 &>/dev/null; then
+        payload=$(python3 -c "
+import json, sys
+title, message = sys.argv[1], sys.argv[2]
+body_text = title + '\n\n' + message
+body_html = '<b>' + title + '</b><br><pre>' + message + '</pre>'
+print(json.dumps({'msgtype': 'm.text', 'body': body_text,
+    'format': 'org.matrix.custom.html', 'formatted_body': body_html}))
+" "$title" "$message")
+    else
+        # Fallback: flatten newlines into spaces to keep JSON valid
+        payload=$(printf '{"msgtype":"m.text","body":"%s","format":"org.matrix.custom.html","formatted_body":"%s"}' \
+            "$(printf '%s' "$body_text" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')" \
+            "$(printf '%s' "$body_html" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')")
+    fi
 
     curl -s -XPUT \
         -H "Authorization: Bearer $MATRIX_ACCESS_TOKEN" \
