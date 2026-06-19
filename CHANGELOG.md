@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.3.1] — 2026-06-19
+
+### Security
+
+- **`send_matrix()`**: Fixed invalid JSON payload generation. The `sed`-only body escaping
+  left raw newlines in the `formatted_body` field, causing Matrix homeservers to reject all
+  notifications. Now uses `python3 json.dumps` for both fields; `sed`/`tr` fallback strips
+  newlines with `tr '\n' ' '` on hosts without Python. (Audit finding L-2)
+- **`acquire_lock()`**: Added numeric guard before `eval "exec ${LOCK_FD}>..."`. LOCK_FD is
+  now validated against `^[0-9]+$` before use; non-numeric values default to 200, preventing
+  shell metacharacter injection when running as root. (Audit finding I-1)
+- **Notification secrets off `ps` argv**: Bearer tokens (Ntfy, Matrix) and SMTP credentials
+  are now passed via `curl -K <(printf ...)` process substitution instead of `-H` / `--user`
+  CLI flags. Pushover POST body built via `python3 urllib.parse.urlencode` piped to
+  `--data-binary @-`; fallback retains `--form-string` with `SECURITY[control]` annotation.
+  (Audit finding L-1)
+- **Root ownership warning**: All four entry-point scripts now emit a stderr warning when
+  `EUID==0` but `$SCRIPT_DIR` is not root-owned, with guidance to deploy to
+  `/opt/docker-stack-backup`. README updated with Production/Cron Deployment section.
+  (Audit finding M-1)
+- **`.gitignore`**: Added `.env`, `*.env`, `core.*`, `*.core` to prevent accidental credential
+  commits. (Audit pre-audit baseline SC-02)
+- Accepted risks documented inline (`SECURITY[accepted]`): `--insecure` curl flag for Proton
+  Bridge (opt-in, default false); unquoted `$running_containers` for intentional word-splitting
+  to pass per-service restart args. Full audit record: docker-stack-backup-2026-06.
+
+---
+
 ## [0.3.0] — 2026-06-19
 
 ### Added
