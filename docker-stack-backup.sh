@@ -114,7 +114,6 @@ SMTP_INSECURE=false  # Set to true for self-signed certificates (e.g., Proton Ma
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m' # No Color
@@ -893,7 +892,7 @@ backup_stack() {
     
     # Create a temporary directory for organizing backup contents
     local temp_dir=$(mktemp -d)
-    trap "rm -rf '$temp_dir'" RETURN
+    trap 'rm -rf "$temp_dir"' RETURN
     
     # Copy compose file to temp directory
     cp "$compose_file" "$temp_dir/"

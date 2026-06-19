@@ -341,7 +341,7 @@ perform_restore() {
     local appdata_dir="$APPDATA_PATH/$selected_stack"
     local temp_restore=$(mktemp -d)
     
-    trap "rm -rf '$temp_restore'" RETURN
+    trap 'rm -rf "$temp_restore"' RETURN
     
     # Handle existing data based on mode
     if [[ "$restore_mode" == "backup_first" ]]; then

@@ -15,8 +15,6 @@ detect_os() {
         . /etc/os-release
         OS_NAME="$NAME"
         OS_ID="$ID"
-        OS_VERSION="$VERSION_ID"
-        
         case "$OS_ID" in
             debian) OS_TYPE="debian" ;;
             ubuntu) OS_TYPE="ubuntu" ;;
@@ -47,7 +45,6 @@ BACKUP_BASE="/mnt/backup/docker-backups"
 # Colors
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
