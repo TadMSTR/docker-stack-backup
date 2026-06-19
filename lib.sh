@@ -49,7 +49,9 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 # shellcheck disable=SC2034  # used in sourcing scripts
 BLUE='\033[0;34m'
+# shellcheck disable=SC2034
 CYAN='\033[0;36m'
+# shellcheck disable=SC2034
 BOLD='\033[1m'
 NC='\033[0m'
 

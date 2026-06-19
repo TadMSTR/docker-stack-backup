@@ -1,4 +1,5 @@
 #!/bin/bash
+# shellcheck disable=SC2034  # all vars used by sourcing scripts
 
 #######################################
 # docker-stack-backup — example configuration
