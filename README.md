@@ -1,5 +1,7 @@
 # Docker Stack Backup & Restore
 
+[![CI](https://github.com/TadMSTR/docker-stack-backup/actions/workflows/ci.yml/badge.svg)](https://github.com/TadMSTR/docker-stack-backup/actions/workflows/ci.yml)
+
 A comprehensive backup and restore solution for Docker Compose stacks managed by Dockhand. Designed for home lab and production environments with support for automated backups, manual selective backups, and interactive restoration.
 
 ## Features
@@ -71,7 +73,6 @@ sudo docker-stack-backup-manual.sh
 
 - **[Installation & Usage Guide](USAGE.md)** - Detailed setup and usage instructions
 - **[Notification Setup](NOTIFICATIONS.md)** - Configure Ntfy, Pushover, or Email alerts
-- **[GitHub Setup](GITHUB_SETUP.md)** - SSH keys and repository management
 
 ## Requirements
 
@@ -81,6 +82,7 @@ sudo docker-stack-backup-manual.sh
 - Dockhand for stack management
 - `curl` for notifications (optional)
 - `sendmail` or SMTP access for email (optional)
+- `bats` for running tests: `apt install bats` (optional)
 
 ## Architecture
 
@@ -166,11 +168,20 @@ backup-verify.sh --stats
 ### Clean Old Backups
 
 ```bash
-# Remove backups older than 30 days
+# Remove backups older than 30 days (default)
 cleanup-old-backups.sh
 
-# Or schedule weekly cleanup
-0 3 * * 0 /usr/local/bin/cleanup-old-backups.sh
+# Pass BACKUP_BASE as a CLI argument
+cleanup-old-backups.sh /mnt/nas/backups/docker
+
+# Override via env vars
+BACKUP_BASE=/mnt/nas/backups/docker RETENTION_DAYS=60 cleanup-old-backups.sh
+
+# Depth-1 layout (BACKUP_BASE/YYYY-MM-DD/ instead of BACKUP_BASE/stack/YYYY-MM-DD/)
+SEARCH_DEPTH=1 cleanup-old-backups.sh
+
+# Schedule weekly cleanup via cron
+0 3 * * 0 BACKUP_BASE=/mnt/nas/backups/docker /usr/local/bin/cleanup-old-backups.sh
 ```
 
 ## Configuration
@@ -260,6 +271,13 @@ curl -s --form-string "token=TOKEN" --form-string "user=USER" \
 echo "Test" | sendmail you@example.com
 ```
 
+## Testing
+
+```bash
+apt install bats
+bats tests/cleanup-old-backups.bats
+```
+
 ## Contributing
 
 This is a personal project, but suggestions and improvements are welcome! Feel free to:
@@ -280,18 +298,11 @@ MIT License - See [LICENSE](LICENSE) file for details
 
 ## Changelog
 
-### Version 1.0.0 (Initial Release)
-- Automated backup script with cron support
-- Interactive manual backup mode
-- Interactive restore wizard
-- Notification support (Ntfy, Pushover, Email)
-- Backup verification tools
-- Automatic cleanup script
-- Comprehensive documentation
+See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 ---
 
 **Author:** TadMSTR  
 **Repository:** https://github.com/TadMSTR/docker-stack-backup  
-**Last Updated:** 2026-02-08
+**Last Updated:** 2026-06-19
 

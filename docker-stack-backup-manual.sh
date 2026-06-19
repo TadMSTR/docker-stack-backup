@@ -733,7 +733,7 @@ backup_stack() {
     
     # Create a temporary directory for organizing backup contents
     local temp_dir=$(mktemp -d)
-    trap "rm -rf '$temp_dir'" RETURN
+    trap 'rm -rf "$temp_dir"' RETURN
     
     # Copy compose file to temp directory
     cp "$compose_file" "$temp_dir/"
