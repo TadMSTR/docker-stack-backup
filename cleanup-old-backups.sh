@@ -89,8 +89,8 @@ main() {
         log "Removing old backup: $backup_dir ($(numfmt --to=iec-i --suffix=B $size))"
         
         if rm -rf "$backup_dir"; then
-            ((total_removed++))
-            ((total_size+=size))
+            total_removed=$((total_removed + 1))
+            total_size=$((total_size + size))
         else
             log_error "Failed to remove: $backup_dir"
         fi
