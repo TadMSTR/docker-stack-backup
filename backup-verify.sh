@@ -7,46 +7,17 @@
 
 set -euo pipefail
 
-#######################################
-# OS Detection
-#######################################
-detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS_NAME="$NAME"
-        OS_ID="$ID"
-        case "$OS_ID" in
-            debian) OS_TYPE="debian" ;;
-            ubuntu) OS_TYPE="ubuntu" ;;
-            scale|truenas) OS_TYPE="truenas" ;;
-            proxmox) OS_TYPE="proxmox" ;;
-            *)
-                if [[ -f /etc/version ]] && grep -q "TrueNAS" /etc/version 2>/dev/null; then
-                    OS_TYPE="truenas"
-                elif [[ -f /etc/debian_version ]]; then
-                    OS_TYPE="debian"
-                else
-                    OS_TYPE="unknown"
-                fi
-                ;;
-        esac
-    else
-        OS_TYPE="unknown"
-        OS_NAME="Unknown"
-    fi
-    
-    export OS_TYPE OS_NAME
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=/dev/null
+[[ -f "$SCRIPT_DIR/config.sh" ]] && source "$SCRIPT_DIR/config.sh"
 
 detect_os
 
-BACKUP_BASE="/mnt/backup/docker-backups"
+BACKUP_BASE="${BACKUP_BASE:-/mnt/backup/docker-backups}"
+LOG_FILE="${LOG_FILE:-/dev/null}"
 
-# Colors
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-BLUE='\033[0;34m'
-NC='\033[0m'
 
 show_usage() {
     cat << EOF

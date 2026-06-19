@@ -7,90 +7,20 @@
 
 set -euo pipefail
 
-#######################################
-# OS Detection
-#######################################
-detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS_NAME="$NAME"
-        OS_ID="$ID"
-        OS_VERSION="$VERSION_ID"
-        
-        # Detect specific distributions
-        case "$OS_ID" in
-            debian)
-                OS_TYPE="debian"
-                ;;
-            ubuntu)
-                OS_TYPE="ubuntu"
-                ;;
-            scale|truenas)
-                OS_TYPE="truenas"
-                ;;
-            proxmox)
-                OS_TYPE="proxmox"
-                ;;
-            *)
-                # Check if it's TrueNAS by other means
-                if [[ -f /etc/version ]] && grep -q "TrueNAS" /etc/version 2>/dev/null; then
-                    OS_TYPE="truenas"
-                # Debian-based fallback
-                elif [[ -f /etc/debian_version ]]; then
-                    OS_TYPE="debian"
-                else
-                    OS_TYPE="unknown"
-                fi
-                ;;
-        esac
-    else
-        OS_TYPE="unknown"
-        OS_NAME="Unknown"
-    fi
-    
-    export OS_TYPE OS_NAME OS_ID OS_VERSION
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=/dev/null
+[[ -f "$SCRIPT_DIR/config.sh" ]] && source "$SCRIPT_DIR/config.sh"
 
-# Detect OS on script start
 detect_os
 
-# Configuration
-BACKUP_BASE="/mnt/backup/docker-backups"
-DOCKHAND_BASE="/opt/dockhand/stacks"  # Base path where Dockhand stores stacks (hostname will be appended)
-APPDATA_PATH="/mnt/datastor/appdata"  # Path where stack appdata is stored
-LOG_FILE="/var/log/docker-restore.log"
+BACKUP_BASE="${BACKUP_BASE:-/mnt/backup/docker-backups}"
+DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
+APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
+LOG_FILE="${LOG_FILE:-/var/log/docker-restore.log}"
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
 
-#######################################
-# Logging functions
-#######################################
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
-
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-#######################################
-# UI Helper functions
-#######################################
 print_header() {
     echo -e "\n${BOLD}${BLUE}═══════════════════════════════════════════════════════${NC}"
     echo -e "${BOLD}${BLUE}  Docker Stack Restore Wizard${NC}"

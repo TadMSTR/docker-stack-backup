@@ -1,114 +1,73 @@
 #!/bin/bash
 
 #######################################
-# Docker Stack Manual Backup Script
-# Interactive backup of selected Docker Compose stacks
+# Docker Compose Stack Backup — Manual/Interactive Script
 #######################################
 
 set -euo pipefail
 
-#######################################
-# OS Detection
-#######################################
-detect_os() {
-    if [[ -f /etc/os-release ]]; then
-        . /etc/os-release
-        OS_NAME="$NAME"
-        OS_ID="$ID"
-        OS_VERSION="$VERSION_ID"
-        
-        # Detect specific distributions
-        case "$OS_ID" in
-            debian)
-                OS_TYPE="debian"
-                ;;
-            ubuntu)
-                OS_TYPE="ubuntu"
-                ;;
-            scale|truenas)
-                OS_TYPE="truenas"
-                ;;
-            proxmox)
-                OS_TYPE="proxmox"
-                ;;
-            *)
-                # Check if it's TrueNAS by other means
-                if [[ -f /etc/version ]] && grep -q "TrueNAS" /etc/version 2>/dev/null; then
-                    OS_TYPE="truenas"
-                # Debian-based fallback
-                elif [[ -f /etc/debian_version ]]; then
-                    OS_TYPE="debian"
-                else
-                    OS_TYPE="unknown"
-                fi
-                ;;
-        esac
-    else
-        OS_TYPE="unknown"
-        OS_NAME="Unknown"
-    fi
-    
-    export OS_TYPE OS_NAME OS_ID OS_VERSION
-}
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib.sh
+source "$SCRIPT_DIR/lib.sh"
+# shellcheck source=/dev/null
+[[ -f "$SCRIPT_DIR/config.sh" ]] && source "$SCRIPT_DIR/config.sh"
 
-# Detect OS on script start
 detect_os
 
 # Dry-run mode flag
 DRY_RUN=false
 
-# Configuration
-DOCKHAND_BASE="/opt/dockhand/stacks"  # Base path where Dockhand stores stacks (hostname will be appended)
+# Configuration defaults (override via config.sh or environment variables)
+DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
 HOSTNAME=$(hostname)
-APPDATA_PATH="/mnt/datastor/appdata"  # Path where stack appdata is stored
-BACKUP_DEST="/mnt/backup/docker-backups"  # Destination on TrueNAS
-LOG_FILE="/var/log/docker-backup-manual.log"
+APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
+BACKUP_DEST="${BACKUP_DEST:-/mnt/backup/docker-backups}"
+LOG_FILE="${LOG_FILE:-/var/log/docker-backup-manual.log}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# Compression Configuration
-COMPRESSION_METHOD="none"     # Options: gzip, bzip2, xz, zstd, none
-COMPRESSION_LEVEL=6           # 1-9: 1=fastest/largest, 9=slowest/smallest (for gzip/bzip2/xz)
-USE_PARALLEL=false            # Use parallel compression (pigz/pbzip2/pxz) - faster on multi-core systems
-PARALLEL_THREADS=0            # 0=auto-detect cores, or specify number (e.g., 4)
-# Exclude patterns (relative to appdata directory)
-EXCLUDE_PATTERNS=(
-    # "*/cache/*"
-    # "*/tmp/*"
-    # "*.log"
-    # "*/Trash/*"
-)
+# Compression
+COMPRESSION_METHOD="${COMPRESSION_METHOD:-none}"
+COMPRESSION_LEVEL="${COMPRESSION_LEVEL:-6}"
+USE_PARALLEL="${USE_PARALLEL:-false}"
+PARALLEL_THREADS="${PARALLEL_THREADS:-0}"
+EXCLUDE_PATTERNS=(${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"})
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-BOLD='\033[1m'
-NC='\033[0m'
+# Notifications
+NOTIFY_ON_SUCCESS="${NOTIFY_ON_SUCCESS:-true}"
+NOTIFY_ON_FAILURE="${NOTIFY_ON_FAILURE:-true}"
+NTFY_ENABLED="${NTFY_ENABLED:-false}"
+NTFY_URL="${NTFY_URL:-https://ntfy.sh}"
+NTFY_TOPIC="${NTFY_TOPIC:-docker-backups}"
+NTFY_PRIORITY="${NTFY_PRIORITY:-default}"
+NTFY_TOKEN="${NTFY_TOKEN:-}"
+PUSHOVER_ENABLED="${PUSHOVER_ENABLED:-false}"
+PUSHOVER_USER_KEY="${PUSHOVER_USER_KEY:-}"
+PUSHOVER_API_TOKEN="${PUSHOVER_API_TOKEN:-}"
+PUSHOVER_PRIORITY="${PUSHOVER_PRIORITY:-0}"
+EMAIL_ENABLED="${EMAIL_ENABLED:-false}"
+EMAIL_TO="${EMAIL_TO:-}"
+EMAIL_FROM="${EMAIL_FROM:-docker-backup@$(hostname)}"
+EMAIL_SUBJECT_PREFIX="${EMAIL_SUBJECT_PREFIX:-[Docker Backup]}"
+EMAIL_METHOD="${EMAIL_METHOD:-sendmail}"
+SMTP_SERVER="${SMTP_SERVER:-smtp.gmail.com}"
+SMTP_PORT="${SMTP_PORT:-587}"
+SMTP_USER="${SMTP_USER:-}"
+SMTP_PASSWORD="${SMTP_PASSWORD:-}"
+SMTP_USE_TLS="${SMTP_USE_TLS:-true}"
+SMTP_INSECURE="${SMTP_INSECURE:-false}"
+MATRIX_ENABLED="${MATRIX_ENABLED:-false}"
+MATRIX_HOMESERVER="${MATRIX_HOMESERVER:-}"
+MATRIX_ACCESS_TOKEN="${MATRIX_ACCESS_TOKEN:-}"
+MATRIX_ROOM_ID="${MATRIX_ROOM_ID:-}"
 
-#######################################
-# Logging functions
-#######################################
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
-}
+# File locking (used by acquire_lock/release_lock in lib.sh)
+# shellcheck disable=SC2034
+LOCK_FILE="/var/run/docker-stack-backup-manual.lock"
+# shellcheck disable=SC2034
+LOCK_FD=200
+trap release_lock EXIT INT TERM
 
-log_error() {
-    echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"
-}
 
-log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "$LOG_FILE"
-}
-
-#######################################
-# UI Helper functions
-#######################################
 print_header() {
     echo -e "\n${BOLD}${BLUE}═══════════════════════════════════════════════════════${NC}"
     if [[ "$DRY_RUN" == true ]]; then
@@ -146,38 +105,6 @@ prompt_input() {
     echo "${input:-$default}"
 }
 
-#######################################
-# File locking functions
-#######################################
-LOCK_FILE="/var/run/docker-stack-backup-manual.lock"
-LOCK_FD=200
-
-acquire_lock() {
-    eval "exec $LOCK_FD>$LOCK_FILE"
-    
-    if ! flock -n $LOCK_FD; then
-        log_error "Another backup is already running (lock file: $LOCK_FILE)"
-        log_error "If you're sure no backup is running, remove: $LOCK_FILE"
-        exit 1
-    fi
-    
-    echo $$ >&$LOCK_FD
-    log "Lock acquired (PID: $$)"
-}
-
-release_lock() {
-    if [[ -n "${LOCK_FD:-}" ]]; then
-        flock -u $LOCK_FD 2>/dev/null || true
-        rm -f "$LOCK_FILE" 2>/dev/null || true
-        log "Lock released"
-    fi
-}
-
-trap release_lock EXIT INT TERM
-
-#######################################
-# Pre-flight checks
-#######################################
 check_docker_running() {
     if ! systemctl is-active --quiet docker 2>/dev/null && ! pgrep -x dockerd >/dev/null 2>&1; then
         log_error "Docker daemon is not running"
@@ -282,204 +209,6 @@ run_preflight_checks() {
     return 0
 }
 
-#######################################
-# Improved restart handling
-#######################################
-MAX_RESTART_ATTEMPTS=3
-RESTART_RETRY_DELAY=5
-
-restart_stack_with_retry() {
-    local stack_path="$1"
-    local stack_name; stack_name=$(basename "$stack_path")
-    local running_containers="$2"
-    local attempt=1
-    
-    while [[ $attempt -le $MAX_RESTART_ATTEMPTS ]]; do
-        echo "  └─ Starting containers (attempt $attempt/$MAX_RESTART_ATTEMPTS)..."
-        
-        if (cd "$stack_path" && docker compose up -d $running_containers 2>&1 | sed 's/^/     /'); then
-            sleep 2
-            local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
-            local expected_count; expected_count=$(echo "$running_containers" | wc -w)
-            
-            if [[ $started_count -eq $expected_count ]]; then
-                echo -e "  └─ ${GREEN}✓${NC} All containers started"
-                return 0
-            else
-                echo -e "  └─ ${YELLOW}⚠${NC} Only $started_count of $expected_count started"
-            fi
-        fi
-        
-        if [[ $attempt -lt $MAX_RESTART_ATTEMPTS ]]; then
-            echo "  └─ Waiting ${RESTART_RETRY_DELAY}s before retry..."
-            sleep $RESTART_RETRY_DELAY
-        fi
-        
-        ((attempt++))
-    done
-    
-    echo -e "  └─ ${RED}✗${NC} Failed to restart after $MAX_RESTART_ATTEMPTS attempts"
-    log_error "Stack $stack_name failed to restart"
-    log_error "Manual command: cd $stack_path && docker compose up -d $running_containers"
-    
-    return 1
-}
-
-#######################################
-# Compression functions
-#######################################
-get_compression_extension() {
-    case "$COMPRESSION_METHOD" in
-        gzip)   echo ".tar.gz" ;;
-        bzip2)  echo ".tar.bz2" ;;
-        xz)     echo ".tar.xz" ;;
-        zstd)   echo ".tar.zst" ;;
-        none)   echo ".tar" ;;
-        *)      echo ".tar.gz" ;;
-    esac
-}
-
-get_tar_compression_flag() {
-    if [[ "$USE_PARALLEL" == true ]]; then
-        echo ""  # We'll handle compression separately with parallel tools
-    else
-        case "$COMPRESSION_METHOD" in
-            gzip)   echo "z" ;;
-            bzip2)  echo "j" ;;
-            xz)     echo "J" ;;
-            zstd)   echo "--zstd" ;;
-            none)   echo "" ;;
-            *)      echo "z" ;;
-        esac
-    fi
-}
-
-check_compression_tool() {
-    local tool="$1"
-    if ! command -v "$tool" &> /dev/null; then
-        log_warning "$tool not found. Install with: apt-get install $tool"
-        return 1
-    fi
-    return 0
-}
-
-setup_compression_environment() {
-    # Set compression level environment variable
-    case "$COMPRESSION_METHOD" in
-        gzip)
-            export GZIP="-${COMPRESSION_LEVEL}"
-            ;;
-        bzip2)
-            export BZIP2="-${COMPRESSION_LEVEL}"
-            ;;
-        xz)
-            export XZ_OPT="-${COMPRESSION_LEVEL}"
-            ;;
-    esac
-}
-
-create_compressed_archive() {
-    local output_file="$1"
-    shift
-    local tar_args=("$@")
-    
-    setup_compression_environment
-    
-    # Build exclude arguments
-    local exclude_args=()
-    for pattern in "${EXCLUDE_PATTERNS[@]}"; do
-        exclude_args+=(--exclude="$pattern")
-    done
-    
-    if [[ "$USE_PARALLEL" == true ]]; then
-        # Use parallel compression
-        local compressor=""
-        local compressor_args=()
-        
-        case "$COMPRESSION_METHOD" in
-            gzip)
-                if check_compression_tool pigz; then
-                    compressor="pigz"
-                    compressor_args=("-${COMPRESSION_LEVEL}")
-                    if [[ $PARALLEL_THREADS -gt 0 ]]; then
-                        compressor_args+=("-p" "$PARALLEL_THREADS")
-                    fi
-                else
-                    log_warning "pigz not found, falling back to standard gzip"
-                    USE_PARALLEL=false
-                fi
-                ;;
-            bzip2)
-                if check_compression_tool pbzip2; then
-                    compressor="pbzip2"
-                    compressor_args=("-${COMPRESSION_LEVEL}")
-                    if [[ $PARALLEL_THREADS -gt 0 ]]; then
-                        compressor_args+=("-p${PARALLEL_THREADS}")
-                    fi
-                else
-                    log_warning "pbzip2 not found, falling back to standard bzip2"
-                    USE_PARALLEL=false
-                fi
-                ;;
-            xz)
-                if check_compression_tool pxz; then
-                    compressor="pxz"
-                    compressor_args=("-${COMPRESSION_LEVEL}")
-                    if [[ $PARALLEL_THREADS -gt 0 ]]; then
-                        compressor_args+=("-T${PARALLEL_THREADS}")
-                    fi
-                else
-                    log_warning "pxz not found, falling back to standard xz"
-                    USE_PARALLEL=false
-                fi
-                ;;
-            zstd)
-                if check_compression_tool zstd; then
-                    compressor="zstd"
-                    compressor_args=("-${COMPRESSION_LEVEL}")
-                    if [[ $PARALLEL_THREADS -gt 0 ]]; then
-                        compressor_args+=("-T${PARALLEL_THREADS}")
-                    fi
-                else
-                    log_error "zstd not found"
-                    return 1
-                fi
-                ;;
-            none)
-                # No compression needed
-                tar -cf "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
-                return $?
-                ;;
-        esac
-        
-        if [[ "$USE_PARALLEL" == true ]] && [[ -n "$compressor" ]]; then
-            tar -c "${exclude_args[@]}" "${tar_args[@]}" | "$compressor" "${compressor_args[@]}" > "$output_file"
-            return $?
-        fi
-    fi
-    
-    # Fall back to standard tar compression
-    local compression_flag; compression_flag=$(get_tar_compression_flag)
-    
-    if [[ "$compression_flag" == "--zstd" ]]; then
-        # zstd uses different syntax
-        if ! check_compression_tool zstd; then
-            log_error "zstd compression selected but zstd not found"
-            return 1
-        fi
-        tar -c $compression_flag -f "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
-    elif [[ -n "$compression_flag" ]]; then
-        tar -c${compression_flag}f "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
-    else
-        tar -cf "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
-    fi
-    
-    return $?
-}
-
-#######################################
-# Check if stack has appdata bind mounts
-#######################################
 stack_has_appdata() {
     local compose_file="$1"
     
@@ -500,10 +229,10 @@ stack_has_appdata() {
 get_stack_info() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
-    local compose_file="$stack_path/docker-compose.yml"
-    
+    local compose_file; compose_file=$(find_compose_file "$stack_path") || true
+
     local info=""
-    
+
     # Check if has appdata
     if stack_has_appdata "$compose_file"; then
         local appdata_dir="$APPDATA_PATH/$stack_name"
@@ -553,9 +282,9 @@ select_stacks() {
         fi
         
         local stack_name; stack_name=$(basename "$stack_path")
-        local compose_file="$stack_path/docker-compose.yml"
-        
-        if [[ ! -f "$compose_file" ]]; then
+        local compose_file; compose_file=$(find_compose_file "$stack_path") || true
+
+        if [[ -z "$compose_file" ]]; then
             continue
         fi
         
@@ -586,7 +315,8 @@ select_stacks() {
     if [[ "$selection" == "all" ]]; then
         for idx in "${!stack_list[@]}"; do
             local stack_path="${stack_list[$idx]}"
-            if stack_has_appdata "$stack_path/docker-compose.yml"; then
+            local all_cf; all_cf=$(find_compose_file "$stack_path") || true
+            if [[ -n "$all_cf" ]] && stack_has_appdata "$all_cf"; then
                 selected_stacks+=("$stack_path")
             fi
         done
@@ -639,12 +369,12 @@ show_summary() {
     
     for stack_path in "${selected_stacks[@]}"; do
         local stack_name; stack_name=$(basename "$stack_path")
-        local compose_file="$stack_path/docker-compose.yml"
-        
+        local compose_file; compose_file=$(find_compose_file "$stack_path") || true
+
         echo -e "${BOLD}$stack_name${NC}"
-        
+
         # Check appdata
-        if stack_has_appdata "$compose_file"; then
+        if [[ -n "$compose_file" ]] && stack_has_appdata "$compose_file"; then
             ((stacks_with_appdata++))
             local appdata_dir="$APPDATA_PATH/$stack_name"
             if [[ -d "$appdata_dir" ]]; then
@@ -691,10 +421,15 @@ show_summary() {
 backup_stack() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
-    local compose_file="$stack_path/docker-compose.yml"
-    
+    local compose_file; compose_file=$(find_compose_file "$stack_path") || true
+
     echo -e "\n${CYAN}▶ Backing up: ${BOLD}$stack_name${NC}"
-    
+
+    if [[ -z "$compose_file" ]]; then
+        log_warning "Stack $stack_name: no compose file found, skipping"
+        return 0
+    fi
+
     # Check if stack has appdata
     if ! stack_has_appdata "$compose_file"; then
         log_warning "Stack $stack_name has no appdata bind mounts, skipping"
@@ -834,7 +569,8 @@ perform_backup() {
         
         if backup_stack "$stack_path"; then
             local stack_name; stack_name=$(basename "$stack_path")
-            if stack_has_appdata "$stack_path/docker-compose.yml" && [[ -d "$APPDATA_PATH/$stack_name" ]]; then
+            local perf_cf; perf_cf=$(find_compose_file "$stack_path") || true
+            if [[ -n "$perf_cf" ]] && stack_has_appdata "$perf_cf" && [[ -d "$APPDATA_PATH/$stack_name" ]]; then
                 ((successful++))
             else
                 ((skipped++))
