@@ -1034,7 +1034,6 @@ main() {
             
             total_stacks=$((total_stacks + 1))
             if simulate_backup_stack "$stack_path"; then
-                echo "DEBUG: simulate_backup_stack returned success" >&2
                 backed_up=$((backed_up + 1))
                 if [[ -f /tmp/stack_size_$$ ]]; then
                     local stack_size=$(cat /tmp/stack_size_$$)
