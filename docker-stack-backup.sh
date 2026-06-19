@@ -200,8 +200,8 @@ check_disk_space() {
     fi
     
     # Get available space in GB
-    local available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
-    local available_gb=$((available_kb / 1024 / 1024))
+    local available_kb; available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
+    local available_gb; available_gb=$((available_kb / 1024 / 1024))
     
     if [[ $available_gb -lt $min_free_gb ]]; then
         log_error "Insufficient disk space on $path"
@@ -307,7 +307,7 @@ RESTART_RETRY_DELAY=5  # seconds
 
 restart_stack_with_retry() {
     local stack_path="$1"
-    local stack_name=$(basename "$stack_path")
+    local stack_name; stack_name=$(basename "$stack_path")
     local running_containers="$2"
     local attempt=1
     
@@ -317,8 +317,8 @@ restart_stack_with_retry() {
         if (cd "$stack_path" && docker compose up -d $running_containers 2>&1 | tee -a "$LOG_FILE"); then
             # Verify containers actually started
             sleep 2
-            local started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
-            local expected_count=$(echo "$running_containers" | wc -w)
+            local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+            local expected_count; expected_count=$(echo "$running_containers" | wc -w)
             
             if [[ $started_count -eq $expected_count ]]; then
                 log_success "All containers started successfully"
@@ -469,7 +469,7 @@ send_email_smtp() {
         smtp_url="smtps://$SMTP_SERVER:$SMTP_PORT"
     fi
     
-    local email_content=$(cat <<EOF
+    local email_content; email_content=$(cat <<EOF
 From: $EMAIL_FROM
 To: $EMAIL_TO
 Subject: $subject
@@ -720,7 +720,7 @@ create_compressed_archive() {
     fi
     
     # Fall back to standard tar compression
-    local compression_flag=$(get_tar_compression_flag)
+    local compression_flag; compression_flag=$(get_tar_compression_flag)
     
     if [[ "$compression_flag" == "--zstd" ]]; then
         # zstd uses different syntax
@@ -785,10 +785,10 @@ stack_has_appdata() {
 #######################################
 simulate_backup_stack() {
     local stack_path="$1"
-    local stack_name=$(basename "$stack_path")
+    local stack_name; stack_name=$(basename "$stack_path")
     
     # Find compose file
-    local compose_file=$(find_compose_file "$stack_path")
+    local compose_file; compose_file=$(find_compose_file "$stack_path")
     if [[ -z "$compose_file" ]]; then
         return 2  # Skip - no compose file
     fi
@@ -805,8 +805,8 @@ simulate_backup_stack() {
     fi
     
     # Get appdata size
-    local size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
-    local size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
+    local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
+    local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
     
     # Get running containers
     local running_count=0
@@ -832,10 +832,10 @@ simulate_backup_stack() {
 #######################################
 backup_stack() {
     local stack_path="$1"
-    local stack_name=$(basename "$stack_path")
+    local stack_name; stack_name=$(basename "$stack_path")
     
     # Find compose file
-    local compose_file=$(find_compose_file "$stack_path")
+    local compose_file; compose_file=$(find_compose_file "$stack_path")
     if [[ -z "$compose_file" ]]; then
         log_warning "No compose file found for stack $stack_name"
         return 0
@@ -868,12 +868,12 @@ backup_stack() {
     local backup_dir="$BACKUP_DEST/$HOSTNAME/$TIMESTAMP"
     mkdir -p "$backup_dir"
     
-    local backup_ext=$(get_compression_extension)
+    local backup_ext; backup_ext=$(get_compression_extension)
     local backup_file="$backup_dir/${stack_name}${backup_ext}"
     
     # Get list of running containers before stopping
     log "Checking container states for stack: $stack_name"
-    local running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
+    local running_containers; running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
     
     if [[ -z "$running_containers" ]]; then
         log_warning "No running containers in stack $stack_name, skipping backup"
@@ -891,7 +891,7 @@ backup_stack() {
     log "Creating backup: $backup_file"
     
     # Create a temporary directory for organizing backup contents
-    local temp_dir=$(mktemp -d)
+    local temp_dir; temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' RETURN
     
     # Copy compose file to temp directory
@@ -1027,7 +1027,7 @@ main() {
             fi
             
             # Check if stack has a compose file
-            local compose_file=$(find_compose_file "$stack_path")
+            local compose_file; compose_file=$(find_compose_file "$stack_path")
             if [[ -z "$compose_file" ]]; then
                 continue
             fi
@@ -1036,15 +1036,15 @@ main() {
             if simulate_backup_stack "$stack_path"; then
                 backed_up=$((backed_up + 1))
                 if [[ -f /tmp/stack_size_$$ ]]; then
-                    local stack_size=$(cat /tmp/stack_size_$$)
+                    local stack_size; stack_size=$(cat /tmp/stack_size_$$)
                     total_size=$((total_size + stack_size))
                     rm -f /tmp/stack_size_$$
                 fi
             else
-                local stack_name=$(basename "$stack_path")
+                local stack_name; stack_name=$(basename "$stack_path")
                 
                 # Only add to skip list if it has a compose file but no appdata
-                local compose_file=$(find_compose_file "$stack_path")
+                local compose_file; compose_file=$(find_compose_file "$stack_path")
                 if [[ -n "$compose_file" ]]; then
                     skip_list+=("$stack_name")
                 fi
@@ -1060,8 +1060,8 @@ main() {
             done
         fi
         
-        local total_size_human=$(numfmt --to=iec-i --suffix=B $total_size 2>/dev/null || echo "${total_size} bytes")
-        local backup_ext=$(get_compression_extension)
+        local total_size_human; total_size_human=$(numfmt --to=iec-i --suffix=B $total_size 2>/dev/null || echo "${total_size} bytes")
+        local backup_ext; backup_ext=$(get_compression_extension)
         
         echo -e "\n${CYAN}=========================================${NC}"
         echo -e "${BOLD}Summary:${NC}"
@@ -1075,9 +1075,9 @@ main() {
         echo ""
         
         # Check if there's enough space
-        local available_kb=$(df -k "$BACKUP_DEST" | awk 'NR==2 {print $4}')
-        local available_bytes=$((available_kb * 1024))
-        local available_human=$(numfmt --to=iec-i --suffix=B $available_bytes)
+        local available_kb; available_kb=$(df -k "$BACKUP_DEST" | awk 'NR==2 {print $4}')
+        local available_bytes; available_bytes=$((available_kb * 1024))
+        local available_human; available_human=$(numfmt --to=iec-i --suffix=B $available_bytes)
         
         echo "  Space available: ${available_human}"
         
@@ -1108,7 +1108,7 @@ main() {
         fi
         
         # Check if stack has a compose file
-        local compose_file=$(find_compose_file "$stack_path")
+        local compose_file; compose_file=$(find_compose_file "$stack_path")
         if [[ -z "$compose_file" ]]; then
             continue
         fi

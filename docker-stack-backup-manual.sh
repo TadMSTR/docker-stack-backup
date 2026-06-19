@@ -203,8 +203,8 @@ check_disk_space() {
         return 1
     fi
     
-    local available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
-    local available_gb=$((available_kb / 1024 / 1024))
+    local available_kb; available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
+    local available_gb; available_gb=$((available_kb / 1024 / 1024))
     
     if [[ $available_gb -lt $min_free_gb ]]; then
         log_error "Insufficient disk space: ${available_gb}GB available, ${min_free_gb}GB required"
@@ -268,8 +268,8 @@ run_preflight_checks() {
         echo -e "${RED}✗${NC} Insufficient disk space"
         checks_passed=false
     else
-        local available_kb=$(df -k "$BACKUP_DEST" | awk 'NR==2 {print $4}')
-        local available_gb=$((available_kb / 1024 / 1024))
+        local available_kb; available_kb=$(df -k "$BACKUP_DEST" | awk 'NR==2 {print $4}')
+        local available_gb; available_gb=$((available_kb / 1024 / 1024))
         echo -e "${GREEN}✓${NC} Disk space: ${available_gb}GB available"
     fi
     
@@ -290,7 +290,7 @@ RESTART_RETRY_DELAY=5
 
 restart_stack_with_retry() {
     local stack_path="$1"
-    local stack_name=$(basename "$stack_path")
+    local stack_name; stack_name=$(basename "$stack_path")
     local running_containers="$2"
     local attempt=1
     
@@ -299,8 +299,8 @@ restart_stack_with_retry() {
         
         if (cd "$stack_path" && docker compose up -d $running_containers 2>&1 | sed 's/^/     /'); then
             sleep 2
-            local started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
-            local expected_count=$(echo "$running_containers" | wc -w)
+            local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+            local expected_count; expected_count=$(echo "$running_containers" | wc -w)
             
             if [[ $started_count -eq $expected_count ]]; then
                 echo -e "  └─ ${GREEN}✓${NC} All containers started"
@@ -459,7 +459,7 @@ create_compressed_archive() {
     fi
     
     # Fall back to standard tar compression
-    local compression_flag=$(get_tar_compression_flag)
+    local compression_flag; compression_flag=$(get_tar_compression_flag)
     
     if [[ "$compression_flag" == "--zstd" ]]; then
         # zstd uses different syntax
@@ -499,7 +499,7 @@ stack_has_appdata() {
 #######################################
 get_stack_info() {
     local stack_path="$1"
-    local stack_name=$(basename "$stack_path")
+    local stack_name; stack_name=$(basename "$stack_path")
     local compose_file="$stack_path/docker-compose.yml"
     
     local info=""
@@ -508,7 +508,7 @@ get_stack_info() {
     if stack_has_appdata "$compose_file"; then
         local appdata_dir="$APPDATA_PATH/$stack_name"
         if [[ -d "$appdata_dir" ]]; then
-            local size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
+            local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
             info="appdata: $size"
         else
             info="appdata: (missing)"
@@ -552,7 +552,7 @@ select_stacks() {
             continue
         fi
         
-        local stack_name=$(basename "$stack_path")
+        local stack_name; stack_name=$(basename "$stack_path")
         local compose_file="$stack_path/docker-compose.yml"
         
         if [[ ! -f "$compose_file" ]]; then
@@ -562,7 +562,7 @@ select_stacks() {
         stack_list["$i"]="$stack_path"
         stack_names+=("$stack_name")
         
-        local info=$(get_stack_info "$stack_path")
+        local info; info=$(get_stack_info "$stack_path")
         echo -e "  ${GREEN}$i)${NC} ${BOLD}$stack_name${NC} ($info)"
         ((i++))
     done
@@ -578,7 +578,7 @@ select_stacks() {
     echo "  - Enter ranges with dash (e.g., '1-3 5 7-9')"
     echo ""
     
-    local selection=$(prompt_input "Your selection")
+    local selection; selection=$(prompt_input "Your selection")
     
     # Parse selection
     selected_stacks=()
@@ -619,7 +619,7 @@ select_stacks() {
     # Show selection summary
     echo -e "\n${GREEN}✓${NC} Selected ${BOLD}${#selected_stacks[@]}${NC} stack(s):"
     for stack_path in "${selected_stacks[@]}"; do
-        local stack_name=$(basename "$stack_path")
+        local stack_name; stack_name=$(basename "$stack_path")
         echo "  - $stack_name"
     done
 }
@@ -638,7 +638,7 @@ show_summary() {
     echo ""
     
     for stack_path in "${selected_stacks[@]}"; do
-        local stack_name=$(basename "$stack_path")
+        local stack_name; stack_name=$(basename "$stack_path")
         local compose_file="$stack_path/docker-compose.yml"
         
         echo -e "${BOLD}$stack_name${NC}"
@@ -648,8 +648,8 @@ show_summary() {
             ((stacks_with_appdata++))
             local appdata_dir="$APPDATA_PATH/$stack_name"
             if [[ -d "$appdata_dir" ]]; then
-                local size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
-                local size_human=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
+                local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
+                local size_human; size_human=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
                 ((total_size+=size_bytes))
                 echo "  └─ Appdata: $size_human"
             else
@@ -660,7 +660,7 @@ show_summary() {
         fi
         
         # Check running containers
-        local running=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+        local running; running=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
         if [[ $running -gt 0 ]]; then
             ((running_stacks++))
             echo -e "  └─ Status: ${GREEN}$running container(s) running (will be stopped during backup)${NC}"
@@ -690,7 +690,7 @@ show_summary() {
 #######################################
 backup_stack() {
     local stack_path="$1"
-    local stack_name=$(basename "$stack_path")
+    local stack_name; stack_name=$(basename "$stack_path")
     local compose_file="$stack_path/docker-compose.yml"
     
     echo -e "\n${CYAN}▶ Backing up: ${BOLD}$stack_name${NC}"
@@ -712,11 +712,11 @@ backup_stack() {
     local backup_dir="$BACKUP_DEST/$HOSTNAME/$TIMESTAMP"
     mkdir -p "$backup_dir"
     
-    local backup_ext=$(get_compression_extension)
+    local backup_ext; backup_ext=$(get_compression_extension)
     local backup_file="$backup_dir/${stack_name}${backup_ext}"
     
     # Get list of running containers before stopping
-    local running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
+    local running_containers; running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
     
     if [[ -z "$running_containers" ]]; then
         log_warning "No running containers in stack $stack_name"
@@ -732,7 +732,7 @@ backup_stack() {
     echo "  └─ Creating backup archive..."
     
     # Create a temporary directory for organizing backup contents
-    local temp_dir=$(mktemp -d)
+    local temp_dir; temp_dir=$(mktemp -d)
     trap 'rm -rf "$temp_dir"' RETURN
     
     # Copy compose file to temp directory
@@ -752,7 +752,7 @@ backup_stack() {
     if create_compressed_archive "$backup_file" \
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | sed 's/^/     /'; then
-        local backup_size=$(du -sh "$backup_file" | cut -f1)
+        local backup_size; backup_size=$(du -sh "$backup_file" | cut -f1)
         echo -e "  └─ ${GREEN}✓${NC} Backup created: $backup_size"
     else
         log_error "Failed to create backup for $stack_name"
@@ -786,15 +786,15 @@ perform_backup() {
         
         local total_size=0
         for stack_path in "${selected_stacks[@]}"; do
-            local stack_name=$(basename "$stack_path")
+            local stack_name; stack_name=$(basename "$stack_path")
             local appdata_dir="$APPDATA_PATH/$stack_name"
             
             if [[ -d "$appdata_dir" ]]; then
-                local size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
-                local size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
+                local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
+                local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
                 ((total_size+=size_bytes))
                 
-                local running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+                local running_count; running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
                 
                 if [[ $running_count -gt 0 ]]; then
                     echo -e "  ${GREEN}✓${NC} $stack_name ($size, $running_count running)"
@@ -804,7 +804,7 @@ perform_backup() {
             fi
         done
         
-        local total_size_human=$(numfmt --to=iec-i --suffix=B $total_size 2>/dev/null || echo "${total_size} bytes")
+        local total_size_human; total_size_human=$(numfmt --to=iec-i --suffix=B $total_size 2>/dev/null || echo "${total_size} bytes")
         
         echo -e "\n${BLUE}═══════════════════════════════════════════════════════${NC}"
         echo -e "Total stacks: ${BOLD}${#selected_stacks[@]}${NC}"
@@ -833,7 +833,7 @@ perform_backup() {
         echo -e "\n${BLUE}[${current}/${total}]${NC}"
         
         if backup_stack "$stack_path"; then
-            local stack_name=$(basename "$stack_path")
+            local stack_name; stack_name=$(basename "$stack_path")
             if stack_has_appdata "$stack_path/docker-compose.yml" && [[ -d "$APPDATA_PATH/$stack_name" ]]; then
                 ((successful++))
             else
