@@ -8,6 +8,20 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# When running as root, warn if scripts are not root-owned (local privesc path).
+# For cron/production use, deploy to a root-owned directory — see README.
+if [[ $EUID -eq 0 ]]; then
+    _dir_owner=$(stat -c '%U' "$SCRIPT_DIR" 2>/dev/null || echo "unknown")
+    if [[ "$_dir_owner" != "root" ]]; then
+        echo "[WARNING] Running as root but $SCRIPT_DIR is owned by '$_dir_owner'." >&2
+        echo "[WARNING] lib.sh and config.sh will be sourced as root. For cron/production" >&2
+        echo "[WARNING] use, deploy to a root-owned directory: sudo cp -r . /opt/docker-stack-backup" >&2
+        echo "[WARNING]   && sudo chown -R root:root /opt/docker-stack-backup" >&2
+    fi
+    unset _dir_owner
+fi
+
 # shellcheck source=lib.sh
 source "$SCRIPT_DIR/lib.sh"
 # shellcheck source=/dev/null

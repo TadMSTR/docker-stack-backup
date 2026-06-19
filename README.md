@@ -226,10 +226,32 @@ MATRIX_ROOM_ID="!roomid:matrix.example.com"
 
 See [NOTIFICATIONS.md](NOTIFICATIONS.md) for detailed setup.
 
+## Production / Cron Deployment
+
+For cron or unattended root execution, deploy to a **root-owned directory** so that a user-context compromise cannot inject code into `lib.sh` or `config.sh` before they are sourced as root:
+
+```bash
+sudo cp -r . /opt/docker-stack-backup
+sudo chown -R root:root /opt/docker-stack-backup
+sudo chmod 750 /opt/docker-stack-backup
+# Place your config.sh there (root-readable only)
+sudo cp config.sh /opt/docker-stack-backup/config.sh
+sudo chmod 600 /opt/docker-stack-backup/config.sh
+```
+
+Then reference the installed path in your crontab:
+
+```bash
+0 2 * * * /opt/docker-stack-backup/docker-stack-backup.sh
+```
+
+Running the scripts directly from a user-owned checkout (`~/repos/...`) as root will display a warning to stderr. This is safe for interactive use and testing; it is not recommended for production.
+
 ## Security Considerations
 
 - Scripts require root access (needed for Docker operations)
-- Store sensitive credentials in environment variables or encrypted config files
+- Store sensitive credentials in `config.sh` (git-ignored, see `config.example.sh`)
+- For production/cron use, deploy to a root-owned directory (see above)
 - Use SSH keys for GitHub access (not HTTPS tokens in scripts)
 - Consider encrypting backups if storing off-site
 - Review backup contents before restoring

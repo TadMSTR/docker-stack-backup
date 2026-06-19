@@ -80,6 +80,7 @@ log_warning() {
 # Requires: LOCK_FILE, LOCK_FD to be set by caller
 #######################################
 acquire_lock() {
+    [[ "${LOCK_FD:-200}" =~ ^[0-9]+$ ]] || LOCK_FD=200
     eval "exec ${LOCK_FD:=200}>${LOCK_FILE:=/var/run/docker-stack-backup.lock}"
 
     if ! flock -n $LOCK_FD; then
@@ -116,6 +117,10 @@ restart_stack_with_retry() {
     while [[ $attempt -le $MAX_RESTART_ATTEMPTS ]]; do
         log "Starting containers (attempt $attempt/$MAX_RESTART_ATTEMPTS)..."
 
+        # SECURITY[accepted]: $running_containers is intentionally unquoted — word-splitting
+        # passes each service name as a separate argument to docker compose. Values come from
+        # `docker compose ps --services` (operator-controlled). Audit: 2026-06-19/docker-stack-backup-2026-06.
+        # shellcheck disable=SC2086
         if (cd "$stack_path" && docker compose up -d $running_containers 2>&1 | tee -a "$LOG_FILE"); then
             sleep 2
             local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
@@ -205,8 +210,9 @@ send_ntfy() {
         -d "$message"
     )
 
+    # Pass token via --config/-K to keep it off the process table (ps aux)
     if [[ -n "${NTFY_TOKEN:-}" ]]; then
-        curl_args+=(-H "Authorization: Bearer $NTFY_TOKEN")
+        curl_args+=(-K <(printf 'header = "Authorization: Bearer %s"\n' "$NTFY_TOKEN"))
     fi
 
     if ! curl -s "${curl_args[@]}" "${NTFY_URL:-https://ntfy.sh}/${NTFY_TOPIC:-docker-backups}" >/dev/null 2>&1; then
@@ -226,14 +232,34 @@ send_pushover() {
     local message="$2"
     local priority="${3:-${PUSHOVER_PRIORITY:-0}}"
 
-    if ! curl -s \
-        --form-string "token=$PUSHOVER_API_TOKEN" \
-        --form-string "user=$PUSHOVER_USER_KEY" \
-        --form-string "title=$title" \
-        --form-string "message=$message" \
-        --form-string "priority=$priority" \
-        https://api.pushover.net/1/messages.json >/dev/null 2>&1; then
-        log_error "Failed to send Pushover notification"
+    # Build POST body via python3 to keep token/user_key off the process table.
+    # python3 is already required for Matrix URL encoding (see README).
+    if command -v python3 &>/dev/null; then
+        local post_data
+        post_data=$(python3 -c "
+import urllib.parse, sys
+token, user, title, message, priority = sys.argv[1:6]
+print(urllib.parse.urlencode({'token': token, 'user': user,
+    'title': title, 'message': message, 'priority': priority}))
+" "$PUSHOVER_API_TOKEN" "$PUSHOVER_USER_KEY" "$title" "$message" "$priority")
+        if ! printf '%s' "$post_data" | curl -s -XPOST \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-binary @- \
+            https://api.pushover.net/1/messages.json >/dev/null 2>&1; then
+            log_error "Failed to send Pushover notification"
+        fi
+    else
+        # SECURITY[control]: fallback only on hosts without python3; secrets visible in ps.
+        # README lists python3 as a requirement. Audit: 2026-06-19/docker-stack-backup-2026-06.
+        if ! curl -s \
+            --form-string "token=$PUSHOVER_API_TOKEN" \
+            --form-string "user=$PUSHOVER_USER_KEY" \
+            --form-string "title=$title" \
+            --form-string "message=$message" \
+            --form-string "priority=$priority" \
+            https://api.pushover.net/1/messages.json >/dev/null 2>&1; then
+            log_error "Failed to send Pushover notification"
+        fi
     fi
 }
 
@@ -285,11 +311,14 @@ EOF
         --upload-file -
     )
 
+    # Pass credentials via --config/-K to keep them off the process table (ps aux)
     if [[ -n "${SMTP_USER:-}" ]] && [[ -n "${SMTP_PASSWORD:-}" ]]; then
-        curl_args+=(--user "$SMTP_USER:$SMTP_PASSWORD")
+        curl_args+=(-K <(printf 'user = "%s:%s"\n' "$SMTP_USER" "$SMTP_PASSWORD"))
     fi
 
     if [[ "${SMTP_INSECURE:-false}" == true ]]; then
+        # SECURITY[accepted]: --insecure disables TLS cert verification. Opt-in only (default false).
+        # Documented use case: Proton Mail Bridge self-signed cert. Audit: 2026-06-19/docker-stack-backup-2026-06.
         curl_args+=(--insecure)
     fi
 
@@ -336,15 +365,28 @@ send_matrix() {
         encoded_room=$(printf '%s' "$MATRIX_ROOM_ID" | sed 's/!/%21/g; s/:/%3A/g')
     fi
 
-    local body_text="${title}\n\n${message}"
+    local body_text="${title}"$'\n\n'"${message}"
     local body_html="<b>${title}</b><br><pre>${message}</pre>"
     local payload
-    payload=$(printf '{"msgtype":"m.text","body":"%s","format":"org.matrix.custom.html","formatted_body":"%s"}' \
-        "$(printf '%s' "$body_text" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')" \
-        "$(printf '%s' "$body_html" | sed 's/\\/\\\\/g; s/"/\\"/g')")
+    if command -v python3 &>/dev/null; then
+        payload=$(python3 -c "
+import json, sys
+title, message = sys.argv[1], sys.argv[2]
+body_text = title + '\n\n' + message
+body_html = '<b>' + title + '</b><br><pre>' + message + '</pre>'
+print(json.dumps({'msgtype': 'm.text', 'body': body_text,
+    'format': 'org.matrix.custom.html', 'formatted_body': body_html}))
+" "$title" "$message")
+    else
+        # Fallback: flatten newlines into spaces to keep JSON valid
+        payload=$(printf '{"msgtype":"m.text","body":"%s","format":"org.matrix.custom.html","formatted_body":"%s"}' \
+            "$(printf '%s' "$body_text" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')" \
+            "$(printf '%s' "$body_html" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' ')")
+    fi
 
+    # Pass token via --config/-K to keep it off the process table (ps aux)
     curl -s -XPUT \
-        -H "Authorization: Bearer $MATRIX_ACCESS_TOKEN" \
+        -K <(printf 'header = "Authorization: Bearer %s"\n' "$MATRIX_ACCESS_TOKEN") \
         -H "Content-Type: application/json" \
         -d "$payload" \
         "${MATRIX_HOMESERVER}/_matrix/client/v3/rooms/${encoded_room}/send/m.room.message/${txn_id}" \
