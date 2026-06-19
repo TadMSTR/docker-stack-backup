@@ -1,10 +1,17 @@
 # Notification Setup Guide
 
-The backup script supports three notification methods: Ntfy, Pushover, and Email. You can enable one, multiple, or all of them.
+The backup script supports four notification methods: Ntfy, Pushover, Email, and Matrix. You can enable one, multiple, or all of them.
 
 ## Quick Setup
 
-Edit the notification section in `docker-stack-backup.sh`:
+Copy `config.example.sh` to `config.sh` and set your notification variables:
+
+```bash
+cp config.example.sh config.sh
+$EDITOR config.sh
+```
+
+At minimum, configure the toggles:
 
 ```bash
 # Notification Configuration
@@ -205,6 +212,60 @@ SMTP_USE_TLS=true  # false for port 25
 
 ---
 
+## Matrix Setup
+
+[Matrix](https://matrix.org) is an open, federated messaging protocol. You can use Element, Synapse, or any Matrix homeserver.
+
+### Prerequisites
+
+- A Matrix account on any homeserver (matrix.org, your own Synapse, etc.)
+- An access token for that account
+- The room ID of the room to post notifications to
+
+### Get your access token
+
+In Element: **Settings → Help & About → scroll to "Advanced" → Access Token**
+
+Or via API:
+```bash
+curl -XPOST 'https://matrix.example.com/_matrix/client/v3/login' \
+  -H 'Content-Type: application/json' \
+  -d '{"type":"m.login.password","user":"youruser","password":"yourpassword"}'
+```
+
+The `access_token` field in the response is your token.
+
+### Get the room ID
+
+In Element: open the room → **Room Settings → Advanced → Internal room ID**
+
+Room IDs look like: `!AbCdEfGhIjKlMnOp:matrix.example.com`
+
+### Configure the script
+
+In `config.sh`:
+
+```bash
+MATRIX_ENABLED=true
+MATRIX_HOMESERVER="https://matrix.example.com"
+MATRIX_ACCESS_TOKEN="syt_yourtoken"
+MATRIX_ROOM_ID="!roomid:matrix.example.com"
+```
+
+**Note:** `python3` is used to URL-encode the room ID. If python3 is unavailable, a sed-based fallback handles `!` and `:` characters (sufficient for standard room IDs).
+
+### Test Matrix
+
+```bash
+curl -XPUT \
+  -H "Authorization: Bearer YOUR_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"msgtype":"m.text","body":"Test from docker-stack-backup"}' \
+  'https://matrix.example.com/_matrix/client/v3/rooms/!roomid%3Amatrix.example.com/send/m.room.message/test-1'
+```
+
+---
+
 ## Testing Notifications
 
 After configuring, test each service:
@@ -337,12 +398,13 @@ Check logs: /var/log/docker-backup.log
 ## Recommendations
 
 **For home use:**
-- Ntfy (self-hosted) - Free, private, easy to set up
-- Or Pushover - Reliable, one-time $5 payment
+- Ntfy (self-hosted) — Free, private, easy to set up
+- Or Matrix — Free and self-hostable; integrates with Element on mobile/desktop
+- Or Pushover — Reliable, one-time $5 payment
 
 **For production:**
-- Email (SMTP) - Professional, creates audit trail
-- Plus Pushover or Ntfy for instant alerts
+- Email (SMTP) — Professional, creates audit trail
+- Plus Pushover, Matrix, or Ntfy for instant alerts
 
 **Best practice:**
 - Enable notifications for failures only (`NOTIFY_ON_SUCCESS=false`)
