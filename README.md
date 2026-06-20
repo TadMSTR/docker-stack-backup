@@ -57,12 +57,13 @@ BACKUP_DEST="/mnt/backup/docker-backups"
 # Make scripts executable
 chmod +x *.sh
 
-# Copy to system bin directory
-sudo cp docker-stack-backup.sh /usr/local/bin/
-sudo cp docker-stack-backup-manual.sh /usr/local/bin/
-sudo cp docker-stack-restore.sh /usr/local/bin/
-sudo cp backup-verify.sh /usr/local/bin/
-sudo cp cleanup-old-backups.sh /usr/local/bin/
+# Copy to system bin directory. lib.sh is sourced by every script and
+# MUST be installed alongside them, or the scripts will fail to start.
+sudo cp docker-stack-backup.sh docker-stack-backup-manual.sh docker-stack-restore.sh \
+        backup-verify.sh cleanup-old-backups.sh lib.sh /usr/local/bin/
+
+# If you created a config.sh in step 2, copy it to the same directory:
+sudo cp config.sh /usr/local/bin/ && sudo chmod 600 /usr/local/bin/config.sh
 ```
 
 ### 4. Test Run
@@ -88,7 +89,7 @@ sudo docker-stack-backup-manual.sh
 - Dockhand for stack management
 - `curl` for notifications (optional)
 - `sendmail` or SMTP access for email (optional)
-- `python3` for Matrix room ID URL encoding (optional; sed fallback used if absent)
+- `python3` for safe notification encoding — Matrix JSON bodies and room IDs, Pushover form data (optional; reduced-safety shell fallbacks used if absent)
 - `bats` for running tests: `apt install bats` (optional)
 
 ## Architecture
