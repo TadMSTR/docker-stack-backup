@@ -100,9 +100,20 @@ ELEVATION_HELPER_PATH="${ELEVATION_HELPER_PATH:-}"
 # shellcheck disable=SC2034  # consumed by run_post_restart_hooks in lib.sh
 POST_RESTART_HOOKS=(${POST_RESTART_HOOKS[@]+"${POST_RESTART_HOOKS[@]}"})
 
-# File locking (used by acquire_lock/release_lock in lib.sh)
-# shellcheck disable=SC2034
-LOCK_FILE="/var/run/docker-stack-backup.lock"
+# File locking (used by acquire_lock/release_lock in lib.sh). Default is based on
+# actual writability of /var/run, matching the LOG_FILE convention (DSBAK-6) — /var/run
+# is root-only, which would otherwise make the lock unacquirable for any
+# ELEVATION_CMD-configured unprivileged run. Falls back to a home-relative path. An
+# explicit LOCK_FILE override in config.sh always wins (previously this line
+# unconditionally clobbered any config.sh value — now it doesn't).
+if [[ -z "${LOCK_FILE:-}" ]]; then
+    if [[ -w /var/run ]]; then
+        LOCK_FILE="/var/run/docker-stack-backup.lock"
+    else
+        LOCK_FILE="${HOME}/run/docker-stack-backup.lock"
+    fi
+fi
+mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 # shellcheck disable=SC2034
 LOCK_FD=200
 trap release_lock EXIT INT TERM
@@ -259,7 +270,7 @@ simulate_backup_stack() {
     local stack_name; stack_name=$(basename "$stack_path")
     
     # Find compose file
-    local compose_file; compose_file=$(find_compose_file "$stack_path")
+    local compose_file; compose_file=$(find_compose_file "$stack_path") || true
     if [[ -z "$compose_file" ]]; then
         return 2  # Skip - no compose file
     fi
@@ -306,7 +317,7 @@ backup_stack() {
     local stack_name; stack_name=$(basename "$stack_path")
     
     # Find compose file
-    local compose_file; compose_file=$(find_compose_file "$stack_path")
+    local compose_file; compose_file=$(find_compose_file "$stack_path") || true
     if [[ -z "$compose_file" ]]; then
         log_warning "No compose file found for stack $stack_name"
         return 0
@@ -501,7 +512,7 @@ main() {
             fi
             
             # Check if stack has a compose file
-            local compose_file; compose_file=$(find_compose_file "$stack_path")
+            local compose_file; compose_file=$(find_compose_file "$stack_path") || true
             if [[ -z "$compose_file" ]]; then
                 continue
             fi
@@ -518,7 +529,7 @@ main() {
                 local stack_name; stack_name=$(basename "$stack_path")
                 
                 # Only add to skip list if it has a compose file but no appdata
-                local compose_file; compose_file=$(find_compose_file "$stack_path")
+                local compose_file; compose_file=$(find_compose_file "$stack_path") || true
                 if [[ -n "$compose_file" ]]; then
                     skip_list+=("$stack_name")
                 fi
@@ -582,7 +593,7 @@ main() {
         fi
         
         # Check if stack has a compose file
-        local compose_file; compose_file=$(find_compose_file "$stack_path")
+        local compose_file; compose_file=$(find_compose_file "$stack_path") || true
         if [[ -z "$compose_file" ]]; then
             continue
         fi

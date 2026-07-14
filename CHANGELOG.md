@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.4.3] — 2026-07-14
+
+### Fixed
+
+- **`set -e` silently aborted the entire backup on the first non-stack directory in
+  `DOCKHAND_BASE`.** Five call sites in `docker-stack-backup.sh`
+  (`simulate_backup_stack()`, `backup_stack()`, and three sites in `main()`'s dry-run
+  and real-run loops) did `local compose_file; compose_file=$(find_compose_file
+  "$stack_path")` with no guard. `find_compose_file()` legitimately returns 1 for any
+  directory with no compose file — normal, expected behavior for filtering out
+  non-stack entries (e.g. an `_archive/` folder alongside real stacks) — but under
+  `set -euo pipefail`, that nonzero exit killed the *entire script* on the bare
+  assignment, before the very next line's `[[ -z "$compose_file" ]]` check ever ran.
+  Every real cron run would silently process only the alphabetically-first stack(s)
+  and stop — worse, because the abort happens mid-loop, `main()`'s final
+  `send_notifications()` call is never reached either, so **no success or failure
+  alert fires at all**. `docker-stack-backup-manual.sh` already guarded all six of its
+  equivalent sites correctly (`|| true`); this fix was simply never ported to the
+  automated script. Found by sysadmin via `bash -x` trace against forge's real
+  `~/docker/` layout (37 entries; script silently stopped after 1).
+- **Same class, found while auditing per this fix's own recommendation:** three
+  `docker compose ps ... | wc -l` pipelines (`lib.sh`'s `restart_stack_with_retry()`,
+  and two sites in `docker-stack-backup-manual.sh`) were unguarded — under `pipefail`,
+  a `docker compose ps` failure (not just `wc -l`) aborts the pipeline, which the same
+  `set -e` hazard would kill the script on. Now guarded with `|| <var>=0`, matching the
+  idiom already used at the one site in `docker-stack-backup.sh` that had it right.
+- **`LOCK_FILE` also defaulted to a root-only path** (`/var/run/...`), unconditionally
+  — even overriding a `config.sh` value, since the assignment had no `${LOCK_FILE:-}`
+  guard at all. This made `acquire_lock()` fail for any `ELEVATION_CMD`-configured
+  unprivileged run (found while writing this fix's own regression test). Default now
+  tests actual `/var/run` writability and falls back to `${HOME}/run/...`, matching the
+  `LOG_FILE` convention from DSBAK-6 — and a `config.sh` override now actually takes
+  effect, which it previously didn't.
+
+### Tests
+
+- `tests/set-e-non-stack-entries.bats` — end-to-end fixture (real Docker/Compose, no
+  image pull needed) with a non-stack directory alongside a real stack, covering both
+  `--dry-run` and real-run modes. Confirmed to fail without this fix (reproduces the
+  exact regression) and pass with it.
+
 ## [0.4.2] — 2026-07-14
 
 ### Added
