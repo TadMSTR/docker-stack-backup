@@ -93,9 +93,20 @@ NTFY_URGENT_ONLY="${NTFY_URGENT_ONLY:-false}"
 ELEVATION_CMD="${ELEVATION_CMD:-none}"
 ELEVATION_HELPER_PATH="${ELEVATION_HELPER_PATH:-}"
 
-# File locking (used by acquire_lock/release_lock in lib.sh)
-# shellcheck disable=SC2034
-LOCK_FILE="/var/run/docker-stack-backup-manual.lock"
+# File locking (used by acquire_lock/release_lock in lib.sh). Default is based on
+# actual writability of /var/run, matching the LOG_FILE convention (DSBAK-6) — /var/run
+# is root-only, which would otherwise make the lock unacquirable for any
+# ELEVATION_CMD-configured unprivileged run. Falls back to a home-relative path. An
+# explicit LOCK_FILE override in config.sh always wins (previously this line
+# unconditionally clobbered any config.sh value — now it doesn't).
+if [[ -z "${LOCK_FILE:-}" ]]; then
+    if [[ -w /var/run ]]; then
+        LOCK_FILE="/var/run/docker-stack-backup-manual.lock"
+    else
+        LOCK_FILE="${HOME}/run/docker-stack-backup-manual.lock"
+    fi
+fi
+mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 # shellcheck disable=SC2034
 LOCK_FD=200
 trap release_lock EXIT INT TERM
@@ -282,7 +293,7 @@ get_stack_info() {
     # Check running status
     local running_count=0
     if (cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | grep -q .); then
-        running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+        running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running_count=0
         info="$info, ${GREEN}$running_count running${NC}"
     else
         info="$info, ${YELLOW}stopped${NC}"
@@ -423,7 +434,7 @@ show_summary() {
         fi
         
         # Check running containers
-        local running; running=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+        local running; running=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running=0
         if [[ $running -gt 0 ]]; then
             ((running_stacks++))
             echo -e "  └─ Status: ${GREEN}$running container(s) running (will be stopped during backup)${NC}"
@@ -562,7 +573,7 @@ perform_backup() {
                 local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
                 ((total_size+=size_bytes))
                 
-                local running_count; running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+                local running_count; running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running_count=0
                 
                 if [[ $running_count -gt 0 ]]; then
                     echo -e "  ${GREEN}✓${NC} $stack_name ($size, $running_count running)"

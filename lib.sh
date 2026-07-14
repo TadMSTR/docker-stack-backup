@@ -123,7 +123,7 @@ restart_stack_with_retry() {
         # shellcheck disable=SC2086
         if (cd "$stack_path" && docker compose up -d $running_containers 2>&1 | tee -a "$LOG_FILE"); then
             sleep 2
-            local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l)
+            local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || started_count=0
             local expected_count; expected_count=$(echo "$running_containers" | wc -w)
 
             if [[ $started_count -eq $expected_count ]]; then
