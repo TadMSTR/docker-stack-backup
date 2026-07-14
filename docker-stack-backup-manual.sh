@@ -36,15 +36,18 @@ APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
 BACKUP_DEST="${BACKUP_DEST:-/mnt/backup/docker-backups}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
-# LOG_FILE default depends on whether the script expects to run privileged. With
-# ELEVATION_CMD configured the script runs unprivileged, so /var/log (root-only) isn't
-# writable — default to a home-relative path instead, same convention already used by
-# cleanup-old-backups.sh. An explicit LOG_FILE override always wins either way.
+# LOG_FILE default is based on actual writability, not on ELEVATION_CMD alone — the
+# root-only /var/log default breaks for ANY unprivileged run (misconfigured
+# ELEVATION_CMD or not); testing writability directly also gives a clean
+# require_privileged_or_elevated() error message instead of a raw `tee` failure when
+# someone simply forgot to run as root. Falls back to a home-relative path, same
+# convention already used by cleanup-old-backups.sh. An explicit LOG_FILE override
+# always wins.
 if [[ -z "${LOG_FILE:-}" ]]; then
-    if [[ "${ELEVATION_CMD:-none}" != none ]]; then
-        LOG_FILE="${HOME}/logs/docker-backup-manual.log"
-    else
+    if [[ -w /var/log ]]; then
         LOG_FILE="/var/log/docker-backup-manual.log"
+    else
+        LOG_FILE="${HOME}/logs/docker-backup-manual.log"
     fi
 fi
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true

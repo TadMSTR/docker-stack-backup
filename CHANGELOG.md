@@ -13,16 +13,30 @@
   shared `require_privileged_or_elevated()` in `lib.sh` only requires root when
   `ELEVATION_CMD` is `none` (the default — unchanged behavior). Found by sysadmin
   during the forge cutover to v0.4.0 (DSBAK-6).
+- **Appdata-emptiness check silently skipped exactly the layout `ELEVATION_CMD` exists
+  to handle.** `docker-stack-backup.sh`'s `ls -A "$appdata_dir" 2>/dev/null` can't tell
+  "genuinely empty" from "unreadable by the unprivileged caller" — for any appdata
+  directory that actually needs elevation (i.e. isn't already readable unprivileged),
+  this check silently skipped the stack, logging a benign-looking "is empty... skipping"
+  before `create_compressed_archive()` was ever reached. A nightly cron run could report
+  full success while backing up nothing. New `appdata_has_content()` in `lib.sh` skips
+  this test entirely under `ELEVATION_CMD` and lets the elevated archive-creation call
+  (which runs through the validated helper, as root) be authoritative instead. `--dry-run`
+  size estimates for such stacks still under-report (dry-run never elevates), a known,
+  lower-severity limitation. Found in pre-merge security audit of the `EUID` fix above.
 - **`LOG_FILE` default also required root**, independent of the `EUID` check above —
   `docker-stack-backup.sh`/`docker-stack-backup-manual.sh` defaulted to
   `/var/log/docker-backup*.log`, which an unprivileged `ELEVATION_CMD` user can't write.
   Under `set -euo pipefail`, `log()`'s `tee -a` failure there aborted the script before
   ever reaching the `EUID` check, silently reintroducing the same "elevation doesn't
-  actually work unprivileged" problem this release otherwise fixes. Default now depends
-  on `ELEVATION_CMD`: `${HOME}/logs/docker-backup*.log` when elevation is configured,
-  unchanged `/var/log/...` otherwise — same convention `cleanup-old-backups.sh` already
-  used for its own non-root default. An explicit `LOG_FILE` override always wins.
-  Found during manual verification of the `EUID` fix above, not separately ticketed.
+  actually work unprivileged" problem this release otherwise fixes. **Revised in the
+  same release**, per audit: the initial fix branched the default on `ELEVATION_CMD`,
+  which left the plain "forgot `sudo`" case (`ELEVATION_CMD=none`, unprivileged) still
+  hitting the same raw `tee` failure instead of `require_privileged_or_elevated()`'s
+  clear error message. Default now tests actual writability of `/var/log` directly, and
+  falls back to `${HOME}/logs/docker-backup*.log` regardless of `ELEVATION_CMD` when it
+  isn't writable — same convention `cleanup-old-backups.sh` already used for its own
+  non-root default. An explicit `LOG_FILE` override always wins.
 
 ### Changed
 

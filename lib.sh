@@ -693,6 +693,25 @@ require_privileged_or_elevated() {
 }
 
 #######################################
+# Appdata content check
+# Returns 0 ("has content, attempt backup") or 1 ("empty, skip"). Under ELEVATION_CMD,
+# always returns 0 rather than testing readability directly: the unprivileged caller
+# usually cannot read a root-owned appdata dir it needs elevation for in the first
+# place, and `ls -A`'s permission-denied output is indistinguishable from a truly
+# empty directory — treating that as "empty" would silently skip backing up exactly
+# the appdata layout ELEVATION_CMD exists to handle. Let the elevated archive-creation
+# call (which goes through the validated helper, running as root) be authoritative
+# instead. Requires: ELEVATION_CMD
+#######################################
+appdata_has_content() {
+    local appdata_dir="$1"
+    if [[ "${ELEVATION_CMD:-none}" != none ]]; then
+        return 0
+    fi
+    [[ -n "$(ls -A "$appdata_dir" 2>/dev/null)" ]]
+}
+
+#######################################
 # Compose file discovery
 #######################################
 find_compose_file() {

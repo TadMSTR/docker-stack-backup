@@ -53,10 +53,29 @@ the script itself can run as an unprivileged user (e.g. via cron as a service ac
 it elevates only the one operation the helper covers: reading root-owned appdata during
 archive creation.
 
-Their `LOG_FILE` default follows the same rule: `/var/log/docker-backup*.log` when
-`ELEVATION_CMD=none` (unchanged, matches a root-run install), or `${HOME}/logs/docker-
-backup*.log` when elevation is configured (writable by the unprivileged user). Set
-`LOG_FILE` explicitly in `config.sh` to override either default.
+Their `LOG_FILE` default is chosen by testing actual writability of `/var/log`, not by
+checking `ELEVATION_CMD`: if `/var/log` is writable (the normal root-run case) it's used
+unchanged; otherwise the default falls back to `${HOME}/logs/docker-backup*.log`. This
+also covers the "forgot to configure `ELEVATION_CMD`, or forgot `sudo`" case — you get
+the clear `require_privileged_or_elevated()` error message instead of a raw `tee:
+Permission denied`. Set `LOG_FILE` explicitly in `config.sh` to override either default.
+
+### Appdata emptiness check
+
+`docker-stack-backup.sh` skips a stack whose appdata directory has no content, to avoid
+creating empty archives. Under `ELEVATION_CMD`, this check is skipped rather than tested
+directly: the unprivileged caller usually can't read a root-owned appdata directory it
+needs elevation for in the first place, and a permission-denied `ls -A` looks identical
+to a genuinely empty one. Treating "can't read" as "empty" would silently skip backing
+up exactly the appdata layout `ELEVATION_CMD` exists to handle — a nightly cron run
+could report full success while backing up nothing. With elevation configured, the
+script always proceeds to the archive-creation step (which runs through the validated
+elevated helper, as root) and lets that call be authoritative instead.
+
+**Known limitation:** `--dry-run` mode never elevates (it makes no changes and only
+estimates size via `du`), so its size estimate for a stack whose appdata isn't readable
+unprivileged will under-report — this affects only the dry-run summary, not the actual
+backup made by a real run.
 
 **This does not extend to `docker-stack-restore.sh`.** Restore writes directly into
 appdata (`tar -x`, `cp -a`, `rm -rf` in `perform_restore()`) and no validated helper
