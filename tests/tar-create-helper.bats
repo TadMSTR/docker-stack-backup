@@ -91,6 +91,21 @@ teardown() {
     [[ "$output" == *"invalid stack_name"* ]]
 }
 
+@test "rejects the bare '..' token (would archive the parent of the appdata root)" {
+    # Regression for H-1: '..' passes the char-class regex and -d "<root>/.." is always
+    # true, so without an explicit reject it archives one level above ALLOWED_APPDATA_PATH.
+    run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" ".."
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid stack_name"* ]]
+}
+
+@test "rejects the bare '.' token (would archive the entire appdata root)" {
+    # Regression for L-1: '.' archives every stack instead of one.
+    run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" "."
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"invalid stack_name"* ]]
+}
+
 @test "rejects a leading-dash stack_name" {
     run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" "-C/etc"
     [ "$status" -eq 2 ]

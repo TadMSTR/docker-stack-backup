@@ -2,6 +2,17 @@
 
 ## [0.4.0] — 2026-07-14
 
+### Security
+
+- **Elevation helper `stack_name` validation** — reject the bare `.` and `..` tokens in
+  `docker-backup-tar-create.sh`. The character-class regex admitted `..`, which (since
+  `-d "<root>/.."` is always true) let a caller holding the sudoers/doas grant invoke the
+  helper directly with `stack_name=..` and archive the parent of `ALLOWED_APPDATA_PATH` —
+  a one-level read above the allowlist the helper exists to enforce. `.` similarly widened
+  the archive to the whole appdata root. Added explicit rejection and regression tests for
+  the bare `..`/`.` tokens (the prior test only covered slash-containing values). Found in
+  pre-merge security audit (H-1/L-1).
+
 ### Added
 
 - **Elevation helper (`ELEVATION_CMD`, `ELEVATION_HELPER_PATH`)** — optionally route

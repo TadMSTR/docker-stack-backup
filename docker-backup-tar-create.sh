@@ -58,8 +58,12 @@ esac
 # Appdata root must match the root-configured allowlist above (not arbitrary caller input)
 [[ "$appdata_path" == "$ALLOWED_APPDATA_PATH" ]] || { echo "docker-backup-tar-create: invalid appdata_path: $appdata_path (allowed: $ALLOWED_APPDATA_PATH)" >&2; exit 2; }
 
-# Stack name: single path component, no leading dash (would be parsed as a tar flag)
+# Stack name: single path component, no leading dash (would be parsed as a tar flag).
+# The character class permits '.' and '-' individually, so also reject the '.' and '..'
+# tokens explicitly: '..' would escape ALLOWED_APPDATA_PATH (tar -C <root> .. archives the
+# parent), and '.' would archive the whole appdata root instead of one stack.
 [[ "$stack_name" =~ ^[A-Za-z0-9._-]+$ && "$stack_name" != -* ]] || { echo "docker-backup-tar-create: invalid stack_name: $stack_name" >&2; exit 2; }
+[[ "$stack_name" != "." && "$stack_name" != ".." ]] || { echo "docker-backup-tar-create: invalid stack_name (. and .. are not allowed): $stack_name" >&2; exit 2; }
 [[ -d "$appdata_path/$stack_name" ]] || { echo "docker-backup-tar-create: stack appdata dir not found: $appdata_path/$stack_name" >&2; exit 2; }
 
 exclude_args=()
