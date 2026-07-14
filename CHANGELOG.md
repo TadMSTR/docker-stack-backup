@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.4.0] — 2026-07-14
+
+### Added
+
+- **Elevation helper (`ELEVATION_CMD`, `ELEVATION_HELPER_PATH`)** — optionally route
+  archive creation through a root-owned, argument-validating helper
+  (`docker-backup-tar-create.sh`, now shipped in the repo) instead of running `tar`
+  directly. Lets the backup run unprivileged while elevating only the read of
+  root-owned appdata. The helper never accepts raw `tar` flags — it validates a fixed
+  positional argument list and builds the `tar` invocation itself, closing the
+  `sudo tar` → `--checkpoint-action=exec` GTFOBins local-root hole. The allowed appdata
+  root is pinned by `ALLOWED_APPDATA_PATH` inside the root-owned helper, not by caller
+  input. `create_compressed_archive()` fails closed if the helper is missing, the
+  command is not `sudo`/`doas`, or the archive layout is unexpected. See `ELEVATION.md`
+  and `SECURITY.md`. Defaults to `none` (unchanged behavior).
+- **Per-channel notification severity (`NTFY_URGENT_ONLY`)** — when `true`, ntfy fires on
+  failure only, even if `NOTIFY_ON_SUCCESS=true`; other channels still follow the global
+  toggles. Supports "one loud channel (e.g. Matrix), one urgent-only channel". Default
+  `false`. See `NOTIFICATIONS.md`.
+- **Post-restart hooks (`POST_RESTART_HOOKS`)** — an array of function/command names run
+  after each stack's containers restart successfully, invoked as
+  `<hook> <stack_name> <stack_path>`. A failing hook logs a warning and does not abort
+  the backup. See `HOOKS.md`.
+- **`docker-backup-tar-create.sh`** — the shipped elevation helper (install root-owned
+  `0750`; see `ELEVATION.md`).
+- **`tests/post-restart-hooks.bats`, `tests/tar-create-helper.bats`** — cover hook
+  invocation/failure semantics and the helper's argument validation (crafted
+  `--checkpoint` excludes, path traversal, appdata allowlist, temp-dir shape). CI now
+  runs the whole `tests/` directory.
+
+### Fixed
+
+- **NFS `root_squash` archive writes** — `create_compressed_archive()` now writes every
+  archive via a stdout redirect from the caller's shell (`tar -c … > "$file"`) instead
+  of `tar -cf "$file"`. Under NFS `root_squash`, a root `tar` opening the output file is
+  squashed to `nobody` and denied; letting the caller's (unprivileged) shell open the
+  file avoids this. No behavioral change on local disks. Affected all three tar sites
+  (parallel "none", `--zstd`, and the default sequential path).
+
+---
+
 ## [0.3.1] — 2026-06-19
 
 ### Security

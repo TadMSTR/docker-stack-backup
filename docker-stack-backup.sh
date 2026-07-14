@@ -74,6 +74,15 @@ MATRIX_ENABLED="${MATRIX_ENABLED:-false}"
 MATRIX_HOMESERVER="${MATRIX_HOMESERVER:-}"
 MATRIX_ACCESS_TOKEN="${MATRIX_ACCESS_TOKEN:-}"
 MATRIX_ROOM_ID="${MATRIX_ROOM_ID:-}"
+NTFY_URGENT_ONLY="${NTFY_URGENT_ONLY:-false}"
+
+# Elevation (privileged archive creation via a validated helper — see ELEVATION.md)
+ELEVATION_CMD="${ELEVATION_CMD:-none}"
+ELEVATION_HELPER_PATH="${ELEVATION_HELPER_PATH:-}"
+
+# Post-restart hooks (see HOOKS.md)
+# shellcheck disable=SC2034  # consumed by run_post_restart_hooks in lib.sh
+POST_RESTART_HOOKS=(${POST_RESTART_HOOKS[@]+"${POST_RESTART_HOOKS[@]}"})
 
 # File locking (used by acquire_lock/release_lock in lib.sh)
 # shellcheck disable=SC2034
@@ -381,6 +390,9 @@ backup_stack() {
     else
         log "No containers to restart (none were running before backup)"
     fi
+    
+    # Run any configured post-restart hooks (non-fatal on hook failure)
+    run_post_restart_hooks "$stack_name" "$stack_path"
     
     log_success "Stack $stack_name backed up and restarted successfully"
     return 0

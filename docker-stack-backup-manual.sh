@@ -71,6 +71,11 @@ MATRIX_ENABLED="${MATRIX_ENABLED:-false}"
 MATRIX_HOMESERVER="${MATRIX_HOMESERVER:-}"
 MATRIX_ACCESS_TOKEN="${MATRIX_ACCESS_TOKEN:-}"
 MATRIX_ROOM_ID="${MATRIX_ROOM_ID:-}"
+NTFY_URGENT_ONLY="${NTFY_URGENT_ONLY:-false}"
+
+# Elevation (privileged archive creation via a validated helper — see ELEVATION.md)
+ELEVATION_CMD="${ELEVATION_CMD:-none}"
+ELEVATION_HELPER_PATH="${ELEVATION_HELPER_PATH:-}"
 
 # File locking (used by acquire_lock/release_lock in lib.sh)
 # shellcheck disable=SC2034

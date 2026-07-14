@@ -154,6 +154,33 @@ restart_stack_with_retry() {
 }
 
 #######################################
+# Post-restart hooks
+# Runs each entry in POST_RESTART_HOOKS after a stack's containers restart. Each entry
+# is a shell function name (defined in config.sh) or a command name, invoked as:
+#   <hook> <stack_name> <stack_path>
+# A non-zero hook exit is logged as a warning and does NOT abort the backup — a broken
+# hook must not fail an otherwise-successful run. See HOOKS.md.
+# Requires: POST_RESTART_HOOKS array, LOG_FILE
+#######################################
+run_post_restart_hooks() {
+    local stack_name="$1"
+    local stack_path="$2"
+
+    local hook rc
+    for hook in "${POST_RESTART_HOOKS[@]+"${POST_RESTART_HOOKS[@]}"}"; do
+        [[ -z "$hook" ]] && continue
+        log "Running post-restart hook: $hook ($stack_name)"
+        rc=0
+        "$hook" "$stack_name" "$stack_path" || rc=$?
+        if [[ $rc -eq 0 ]]; then
+            log_success "Post-restart hook succeeded: $hook ($stack_name)"
+        else
+            log_warning "Post-restart hook failed (exit $rc): $hook ($stack_name) — continuing"
+        fi
+    done
+}
+
+#######################################
 # Notification functions
 # Requires: NTFY_*, PUSHOVER_*, EMAIL_*, MATRIX_* vars, HOSTNAME, LOG_FILE
 #######################################
@@ -440,7 +467,14 @@ Time: $(date +'%Y-%m-%d %H:%M:%S')
 Check logs: ${LOG_FILE:-}"
     fi
 
-    send_ntfy "$title" "$message" "$priority" "$tags"
+    # Ntfy honors NTFY_URGENT_ONLY: when true, ntfy fires on failure only — even if
+    # NOTIFY_ON_SUCCESS is true. Every other channel still follows the global toggles
+    # above. This supports "one loud channel (e.g. Matrix), one urgent-only channel".
+    if [[ "$status" == "success" && "${NTFY_URGENT_ONLY:-false}" == true ]]; then
+        log "Ntfy: skipping success notification (NTFY_URGENT_ONLY=true)"
+    else
+        send_ntfy "$title" "$message" "$priority" "$tags"
+    fi
     send_pushover "$title" "$message" "$([ "$status" == "failure" ] && echo 1 || echo 0)"
     send_email "${EMAIL_SUBJECT_PREFIX:-[Docker Backup]} $title" "$message"
     send_matrix "$title" "$message"
@@ -498,6 +532,16 @@ create_compressed_archive() {
     shift
     local tar_args=("$@")
 
+    # Elevated path: when ELEVATION_CMD is set, hand archive creation to a root-owned,
+    # argument-validating helper rather than running tar directly (or, worse, prefixing
+    # tar with sudo — which would let crafted exclude patterns smuggle tar flags such as
+    # --checkpoint-action=exec). The helper builds the tar invocation itself from a fixed
+    # shape; its validation is what makes elevation safe. See ELEVATION.md / SECURITY.md.
+    if [[ "${ELEVATION_CMD:-none}" != none ]]; then
+        create_compressed_archive_elevated "$output_file" "${tar_args[@]}"
+        return $?
+    fi
+
     setup_compression_environment
 
     local exclude_args=()
@@ -551,7 +595,10 @@ create_compressed_archive() {
                 fi
                 ;;
             none)
-                tar -cf "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
+                # NFS-safe: write via stdout redirect (the caller's shell opens the
+                # output file), never `tar -cf` (tar opens it itself — fails under NFS
+                # root_squash when tar runs as root).
+                tar -c "${exclude_args[@]}" "${tar_args[@]}" > "$output_file"
                 return $?
                 ;;
         esac
@@ -564,19 +611,69 @@ create_compressed_archive() {
 
     local compression_flag; compression_flag=$(get_tar_compression_flag)
 
+    # NFS-safe: every path writes via a stdout redirect (the caller's shell opens the
+    # output file) rather than `tar -f` (which makes the tar process open it — and fails
+    # under NFS root_squash when that process is root). No downside for local disks.
     if [[ "$compression_flag" == "--zstd" ]]; then
         if ! check_compression_tool zstd; then
             log_error "zstd compression selected but zstd not found"
             return 1
         fi
-        tar -c $compression_flag -f "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
+        tar -c --zstd "${exclude_args[@]}" "${tar_args[@]}" > "$output_file"
     elif [[ -n "$compression_flag" ]]; then
-        tar -c${compression_flag}f "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
+        tar -c"${compression_flag}" "${exclude_args[@]}" "${tar_args[@]}" > "$output_file"
     else
-        tar -cf "$output_file" "${exclude_args[@]}" "${tar_args[@]}"
+        tar -c "${exclude_args[@]}" "${tar_args[@]}" > "$output_file"
     fi
 
     return $?
+}
+
+#######################################
+# Elevated archive creation
+# Routes tar through a root-owned, argument-validating helper so it can read
+# root-owned appdata (and write NFS-safely) without granting a raw `sudo tar`.
+# Requires: ELEVATION_CMD, ELEVATION_HELPER_PATH, COMPRESSION_METHOD, EXCLUDE_PATTERNS
+#
+# The helper is invoked with a fixed, structured argument list:
+#   <compression> <temp_dir> <appdata_path> <stack_name> [exclude_pattern...]
+# and writes the archive to stdout (no -f), which this function redirects to
+# "$output_file" — the redirect runs in the *caller's* (unprivileged) context, which
+# is what keeps writes to an NFS root_squash export working.
+#######################################
+create_compressed_archive_elevated() {
+    local output_file="$1"; shift
+    local tar_args=("$@")
+
+    case "${ELEVATION_CMD:-none}" in
+        sudo|doas) ;;
+        *) log_error "Unsupported ELEVATION_CMD: '${ELEVATION_CMD:-}' (expected: sudo | doas)"; return 1 ;;
+    esac
+
+    if [[ -z "${ELEVATION_HELPER_PATH:-}" ]]; then
+        log_error "ELEVATION_CMD=${ELEVATION_CMD} but ELEVATION_HELPER_PATH is not set"
+        return 1
+    fi
+    if [[ ! -x "$ELEVATION_HELPER_PATH" ]]; then
+        log_error "ELEVATION_HELPER_PATH not found or not executable: $ELEVATION_HELPER_PATH"
+        return 1
+    fi
+
+    # The helper only accepts the fixed archive layout this project produces:
+    #   -C <temp_dir> . -C <appdata_path> <stack_name>
+    # Fail closed on anything else rather than mis-invoking a privileged command.
+    if [[ ${#tar_args[@]} -ne 6 || "${tar_args[0]}" != "-C" || "${tar_args[2]}" != "." || "${tar_args[3]}" != "-C" ]]; then
+        log_error "Elevated archive creation requires the standard layout: -C <temp_dir> . -C <appdata_path> <stack_name>"
+        return 1
+    fi
+
+    local temp_dir="${tar_args[1]}"
+    local appdata_path="${tar_args[4]}"
+    local stack_name="${tar_args[5]}"
+
+    "$ELEVATION_CMD" "$ELEVATION_HELPER_PATH" \
+        "${COMPRESSION_METHOD:-none}" "$temp_dir" "$appdata_path" "$stack_name" \
+        "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}" > "$output_file"
 }
 
 #######################################

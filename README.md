@@ -80,6 +80,8 @@ sudo docker-stack-backup-manual.sh
 
 - **[Installation & Usage Guide](USAGE.md)** - Detailed setup and usage instructions
 - **[Notification Setup](NOTIFICATIONS.md)** - Configure Ntfy, Pushover, Email, or Matrix alerts
+- **[Privileged Archive Creation](ELEVATION.md)** - Back up root-owned appdata unprivileged, or write to an NFS `root_squash` export, via a validated elevation helper
+- **[Post-Restart Hooks](HOOKS.md)** - Run custom fixups after each stack's containers restart
 
 ## Requirements
 
@@ -225,7 +227,18 @@ MATRIX_ACCESS_TOKEN="syt_yourtoken"
 MATRIX_ROOM_ID="!roomid:matrix.example.com"
 ```
 
+To make one channel quieter than the rest (e.g. Matrix for everything, ntfy for failures
+only), set `NTFY_URGENT_ONLY=true` — see [NOTIFICATIONS.md](NOTIFICATIONS.md) for details.
+
 See [NOTIFICATIONS.md](NOTIFICATIONS.md) for detailed setup.
+
+### Elevation and Hooks
+
+- **Root-owned appdata / NFS `root_squash`:** to run the backup unprivileged and elevate
+  only the archive read (via a validated helper rather than a raw `sudo tar`), set
+  `ELEVATION_CMD` and `ELEVATION_HELPER_PATH`. See [ELEVATION.md](ELEVATION.md).
+- **Post-restart fixups:** register functions/commands in `POST_RESTART_HOOKS` to run
+  after each stack's containers restart. See [HOOKS.md](HOOKS.md).
 
 ## Production / Cron Deployment
 
@@ -340,5 +353,5 @@ See [CHANGELOG.md](CHANGELOG.md) for full version history.
 
 **Author:** TadMSTR  
 **Repository:** https://github.com/TadMSTR/docker-stack-backup  
-**Last Updated:** 2026-06-19
+**Last Updated:** 2026-07-14
 
