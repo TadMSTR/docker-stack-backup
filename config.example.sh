@@ -11,8 +11,16 @@
 #   $EDITOR config.sh
 #######################################
 
-# Stack manager base path (hostname appended automatically)
+# Stack manager base path — the directory containing one subdirectory per stack.
+# Despite the name, this doesn't require actually using Dockhand — it just needs to be
+# "the directory with one subdirectory per compose stack."
 DOCKHAND_BASE="/opt/dockhand/stacks"
+
+# Whether stacks live under $DOCKHAND_BASE/<hostname>/ (true, default — a shared stacks
+# root serving a fleet, each host nested under its own hostname) or directly under
+# $DOCKHAND_BASE with no per-host subdirectory (false — a flat single-host layout, e.g.
+# DOCKHAND_BASE="/home/user/docker" with compose files at /home/user/docker/<stack>/).
+DOCKHAND_APPEND_HOSTNAME=true
 
 # Appdata bind-mount root
 APPDATA_PATH="/mnt/datastor/appdata"

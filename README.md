@@ -51,6 +51,11 @@ APPDATA_PATH="/mnt/datastor/appdata"
 BACKUP_DEST="/mnt/backup/docker-backups"
 ```
 
+`DOCKHAND_BASE` defaults to `$DOCKHAND_BASE/<hostname>` layout (a shared stacks root
+serving a fleet). For a flat single-host setup — stacks directly under one directory,
+e.g. `DOCKHAND_BASE="/home/user/docker"` with compose files at
+`/home/user/docker/<stack>/` — set `DOCKHAND_APPEND_HOSTNAME=false`.
+
 ### 3. Install the Scripts
 
 ```bash

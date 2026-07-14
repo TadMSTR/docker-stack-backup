@@ -29,6 +29,7 @@ detect_os
 
 BACKUP_BASE="${BACKUP_BASE:-/mnt/backup/docker-backups}"
 DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
+DOCKHAND_APPEND_HOSTNAME="${DOCKHAND_APPEND_HOSTNAME:-true}"
 APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
 LOG_FILE="${LOG_FILE:-/var/log/docker-restore.log}"
 
@@ -221,7 +222,7 @@ preview_backup() {
 check_conflicts() {
     print_section "Step 5: Check for Conflicts"
     
-    local stack_dir="$DOCKHAND_BASE/$selected_hostname/$selected_stack"
+    local stack_dir; stack_dir="$(dockhand_stack_base "$selected_hostname")/$selected_stack"
     local appdata_dir="$APPDATA_PATH/$selected_stack"
     local has_conflicts=false
     
@@ -282,7 +283,7 @@ check_conflicts() {
 perform_restore() {
     print_section "Step 6: Performing Restore"
     
-    local stack_dir="$DOCKHAND_BASE/$selected_hostname/$selected_stack"
+    local stack_dir; stack_dir="$(dockhand_stack_base "$selected_hostname")/$selected_stack"
     local appdata_dir="$APPDATA_PATH/$selected_stack"
     local temp_restore; temp_restore=$(mktemp -d)
     
