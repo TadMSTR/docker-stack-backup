@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.4.2] — 2026-07-14
+
+### Added
+
+- **`DOCKHAND_APPEND_HOSTNAME`** — stack discovery (`docker-stack-backup.sh`,
+  `docker-stack-backup-manual.sh`) and restore's target-directory computation
+  (`docker-stack-restore.sh`) always appended the machine hostname as a subdirectory
+  under `DOCKHAND_BASE` (`$DOCKHAND_BASE/$HOSTNAME`), matching a shared/centralized
+  stacks root serving a fleet. This breaks any flat single-host layout where stacks
+  live directly under one directory with no per-host nesting. New
+  `DOCKHAND_APPEND_HOSTNAME` (default `true`, unchanged behavior); set `false` for a
+  flat layout (e.g. `DOCKHAND_BASE="/home/user/docker"` with compose files at
+  `/home/user/docker/<stack>/`). New shared `dockhand_stack_base()` in `lib.sh`
+  centralizes the four call sites across all three scripts. Found by sysadmin during
+  the forge cutover (DSBAK-7) — forge's own layout is exactly this flat case, and
+  `DOCKHAND_BASE` doesn't actually require running Dockhand at all, just a directory
+  with one subdirectory per stack; the variable name is a holdover from the project's
+  original use case.
+
 ## [0.4.1] — 2026-07-14
 
 ### Fixed

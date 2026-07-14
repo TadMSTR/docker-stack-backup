@@ -712,6 +712,27 @@ appdata_has_content() {
 }
 
 #######################################
+# Dockhand stack base path
+# Returns the effective stacks root: $DOCKHAND_BASE/<hostname> by default (a shared
+# stacks root nested by machine hostname, e.g. a centralized Dockhand deployment
+# serving a fleet), or bare $DOCKHAND_BASE when DOCKHAND_APPEND_HOSTNAME=false (a flat
+# single-host layout with no per-host subdirectory — DOCKHAND_BASE need not actually be
+# managed by Dockhand; it's just "the directory containing one subdirectory per
+# stack"). Optional $1 overrides which hostname to append (default: $HOSTNAME) — used
+# by docker-stack-restore.sh, which restores into a possibly different host's
+# subdirectory than the one it's running on.
+# Requires: DOCKHAND_BASE, HOSTNAME, DOCKHAND_APPEND_HOSTNAME
+#######################################
+dockhand_stack_base() {
+    local hostname="${1:-$HOSTNAME}"
+    if [[ "${DOCKHAND_APPEND_HOSTNAME:-true}" == true ]]; then
+        echo "$DOCKHAND_BASE/$hostname"
+    else
+        echo "$DOCKHAND_BASE"
+    fi
+}
+
+#######################################
 # Compose file discovery
 #######################################
 find_compose_file() {

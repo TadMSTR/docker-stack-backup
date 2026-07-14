@@ -31,6 +31,7 @@ DRY_RUN=false
 
 # Configuration defaults (override via config.sh or environment variables)
 DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
+DOCKHAND_APPEND_HOSTNAME="${DOCKHAND_APPEND_HOSTNAME:-true}"
 HOSTNAME=$(hostname)
 APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
 BACKUP_DEST="${BACKUP_DEST:-/mnt/backup/docker-backups}"
@@ -201,7 +202,7 @@ run_preflight_checks() {
         echo -e "${GREEN}✓${NC} Docker daemon running"
     fi
     
-    local stack_base="$DOCKHAND_BASE/$HOSTNAME"
+    local stack_base; stack_base=$(dockhand_stack_base)
     if [[ ! -d "$stack_base" ]]; then
         echo -e "${RED}✗${NC} Dockhand directory not found: $stack_base"
         checks_passed=false
@@ -296,7 +297,7 @@ get_stack_info() {
 select_stacks() {
     print_section "Step 1: Select Stacks to Backup"
     
-    local stack_base="$DOCKHAND_BASE/$HOSTNAME"
+    local stack_base; stack_base=$(dockhand_stack_base)
     
     if [[ ! -d "$stack_base" ]]; then
         log_error "Dockhand directory not found: $stack_base"

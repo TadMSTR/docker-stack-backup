@@ -34,6 +34,7 @@ DRY_RUN=false
 
 # Configuration defaults (override via config.sh or environment variables)
 DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
+DOCKHAND_APPEND_HOSTNAME="${DOCKHAND_APPEND_HOSTNAME:-true}"
 HOSTNAME=$(hostname)
 APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
 BACKUP_DEST="${BACKUP_DEST:-/mnt/backup/docker-backups}"
@@ -180,7 +181,7 @@ check_required_paths() {
     log "Checking required paths..."
     
     # Check Dockhand directory
-    local stack_base="$DOCKHAND_BASE/$HOSTNAME"
+    local stack_base; stack_base=$(dockhand_stack_base)
     if [[ ! -d "$stack_base" ]]; then
         log_error "Dockhand directory not found: $stack_base"
         return 1
@@ -485,7 +486,7 @@ main() {
     local total_size=0
     
     # Get stack base directory
-    local stack_base="$DOCKHAND_BASE/$HOSTNAME"
+    local stack_base; stack_base=$(dockhand_stack_base)
     
     # Dry-run mode
     if [[ "$DRY_RUN" == true ]]; then
