@@ -372,9 +372,16 @@ main() {
     log "OS: $OS_NAME ($OS_TYPE)"
     log "========================================="
     
-    # Check if running as root
+    # Unlike docker-stack-backup.sh/-manual.sh, this check is NOT relaxed by
+    # ELEVATION_CMD: restore writes directly into appdata (tar -x, cp -a, rm -rf —
+    # see perform_restore()) and no helper exists for that direction. ELEVATION_CMD
+    # only covers archive *creation* (read of appdata via docker-backup-tar-create.sh).
+    # Relaxing this check without a matching privileged-write helper would let restore
+    # start (stopping the stack, taking a safety backup) and then fail mid-restore with
+    # permission-denied once it hits root-owned appdata — a worse failure mode than
+    # rejecting upfront. See ELEVATION.md.
     if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root"
+        log_error "This script must be run as root (ELEVATION_CMD does not apply to restore — see ELEVATION.md)"
         exit 1
     fi
     

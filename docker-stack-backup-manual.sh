@@ -34,8 +34,20 @@ DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
 HOSTNAME=$(hostname)
 APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
 BACKUP_DEST="${BACKUP_DEST:-/mnt/backup/docker-backups}"
-LOG_FILE="${LOG_FILE:-/var/log/docker-backup-manual.log}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+# LOG_FILE default depends on whether the script expects to run privileged. With
+# ELEVATION_CMD configured the script runs unprivileged, so /var/log (root-only) isn't
+# writable — default to a home-relative path instead, same convention already used by
+# cleanup-old-backups.sh. An explicit LOG_FILE override always wins either way.
+if [[ -z "${LOG_FILE:-}" ]]; then
+    if [[ "${ELEVATION_CMD:-none}" != none ]]; then
+        LOG_FILE="${HOME}/logs/docker-backup-manual.log"
+    else
+        LOG_FILE="/var/log/docker-backup-manual.log"
+    fi
+fi
+mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
 # Compression
 COMPRESSION_METHOD="${COMPRESSION_METHOD:-none}"
@@ -659,9 +671,8 @@ main() {
     log "OS: $OS_NAME ($OS_TYPE)"
     log "========================================="
     
-    # Check if running as root
-    if [[ $EUID -ne 0 ]]; then
-        log_error "This script must be run as root"
+    # Require root, unless ELEVATION_CMD is configured to elevate archive creation
+    if ! require_privileged_or_elevated; then
         exit 1
     fi
     

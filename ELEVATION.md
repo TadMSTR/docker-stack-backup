@@ -45,6 +45,28 @@ Instead, elevation routes through a small root-owned helper
 - writes the archive to **stdout** (no `-f`), so the privileged process never opens the
   output file.
 
+## Running unprivileged
+
+`docker-stack-backup.sh` and `docker-stack-backup-manual.sh` only require root when
+`ELEVATION_CMD` is `none` (the default). Set `ELEVATION_CMD`/`ELEVATION_HELPER_PATH` and
+the script itself can run as an unprivileged user (e.g. via cron as a service account) —
+it elevates only the one operation the helper covers: reading root-owned appdata during
+archive creation.
+
+Their `LOG_FILE` default follows the same rule: `/var/log/docker-backup*.log` when
+`ELEVATION_CMD=none` (unchanged, matches a root-run install), or `${HOME}/logs/docker-
+backup*.log` when elevation is configured (writable by the unprivileged user). Set
+`LOG_FILE` explicitly in `config.sh` to override either default.
+
+**This does not extend to `docker-stack-restore.sh`.** Restore writes directly into
+appdata (`tar -x`, `cp -a`, `rm -rf` in `perform_restore()`) and no validated helper
+exists for that direction — only archive *creation* (the read side) has one. Restore
+therefore still requires root unconditionally, regardless of `ELEVATION_CMD`. Running it
+unprivileged would let it start (stopping the target stack, taking a safety backup) and
+then fail mid-restore with permission-denied once it reaches root-owned appdata — a worse
+failure mode than rejecting upfront. A privileged-write helper for restore is a possible
+future addition but does not exist today.
+
 ## Configuration
 
 In `config.sh`:

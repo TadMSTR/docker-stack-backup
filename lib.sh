@@ -677,6 +677,22 @@ create_compressed_archive_elevated() {
 }
 
 #######################################
+# Privilege check
+# Requires root UNLESS ELEVATION_CMD is configured — in that case the script is
+# expected to run unprivileged and elevate only the one operation the helper covers
+# (archive creation). Callers whose privileged operation isn't covered by any helper
+# (e.g. restore, which writes directly into appdata) should NOT use this function —
+# they have no unprivileged path and must keep requiring root unconditionally.
+#######################################
+require_privileged_or_elevated() {
+    if [[ $EUID -ne 0 && "${ELEVATION_CMD:-none}" == none ]]; then
+        log_error "This script must be run as root, or configure ELEVATION_CMD/ELEVATION_HELPER_PATH to run unprivileged (see ELEVATION.md)"
+        return 1
+    fi
+    return 0
+}
+
+#######################################
 # Compose file discovery
 #######################################
 find_compose_file() {
