@@ -20,4 +20,4 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: bats-core/bats-action@3.0.0
-      - run: bats tests/cleanup-old-backups.bats
+      - run: bats tests/

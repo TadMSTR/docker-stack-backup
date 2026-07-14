@@ -19,6 +19,10 @@ NOTIFY_ON_SUCCESS=true   # Send notification when backup succeeds
 NOTIFY_ON_FAILURE=true   # Send notification when backup fails
 ```
 
+These toggles gate **every** channel together. To make one channel quieter than the
+rest, see [Per-channel severity: NTFY_URGENT_ONLY](#per-channel-severity-ntfy_urgent_only)
+below.
+
 Then configure the service(s) you want to use:
 
 ---
@@ -77,6 +81,28 @@ https://ntfy.sh/my-docker-backups-xyz123
 # Or command line
 ntfy subscribe my-docker-backups-xyz123
 ```
+
+### Per-channel severity: NTFY_URGENT_ONLY
+
+The global `NOTIFY_ON_SUCCESS` / `NOTIFY_ON_FAILURE` toggles apply to every channel at
+once. If you want one channel to carry everything (success *and* failure) and another to
+fire only on failures, set `NTFY_URGENT_ONLY`:
+
+```bash
+NOTIFY_ON_SUCCESS=true    # global: success notifications on
+NOTIFY_ON_FAILURE=true    # global: failure notifications on
+
+MATRIX_ENABLED=true       # primary channel — receives success and failure
+
+NTFY_ENABLED=true
+NTFY_URGENT_ONLY=true      # ntfy fires on FAILURE only, even though NOTIFY_ON_SUCCESS=true
+```
+
+With this configuration a successful backup posts to Matrix but stays silent on ntfy; a
+failed backup posts to both. `NTFY_URGENT_ONLY` only ever *suppresses* the ntfy success
+message — it never enables a notification the global toggles have turned off, and it does
+not affect any other channel. Default is `false` (ntfy follows the global toggles like
+everything else).
 
 ---
 
