@@ -677,6 +677,41 @@ create_compressed_archive_elevated() {
 }
 
 #######################################
+# Privilege check
+# Requires root UNLESS ELEVATION_CMD is configured — in that case the script is
+# expected to run unprivileged and elevate only the one operation the helper covers
+# (archive creation). Callers whose privileged operation isn't covered by any helper
+# (e.g. restore, which writes directly into appdata) should NOT use this function —
+# they have no unprivileged path and must keep requiring root unconditionally.
+#######################################
+require_privileged_or_elevated() {
+    if [[ $EUID -ne 0 && "${ELEVATION_CMD:-none}" == none ]]; then
+        log_error "This script must be run as root, or configure ELEVATION_CMD/ELEVATION_HELPER_PATH to run unprivileged (see ELEVATION.md)"
+        return 1
+    fi
+    return 0
+}
+
+#######################################
+# Appdata content check
+# Returns 0 ("has content, attempt backup") or 1 ("empty, skip"). Under ELEVATION_CMD,
+# always returns 0 rather than testing readability directly: the unprivileged caller
+# usually cannot read a root-owned appdata dir it needs elevation for in the first
+# place, and `ls -A`'s permission-denied output is indistinguishable from a truly
+# empty directory — treating that as "empty" would silently skip backing up exactly
+# the appdata layout ELEVATION_CMD exists to handle. Let the elevated archive-creation
+# call (which goes through the validated helper, running as root) be authoritative
+# instead. Requires: ELEVATION_CMD
+#######################################
+appdata_has_content() {
+    local appdata_dir="$1"
+    if [[ "${ELEVATION_CMD:-none}" != none ]]; then
+        return 0
+    fi
+    [[ -n "$(ls -A "$appdata_dir" 2>/dev/null)" ]]
+}
+
+#######################################
 # Compose file discovery
 #######################################
 find_compose_file() {
