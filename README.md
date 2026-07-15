@@ -87,6 +87,12 @@ sudo docker-stack-backup-manual.sh
 - **[Notification Setup](NOTIFICATIONS.md)** - Configure Ntfy, Pushover, Email, or Matrix alerts
 - **[Privileged Archive Creation](ELEVATION.md)** - Back up root-owned appdata unprivileged, or write to an NFS `root_squash` export, via a validated elevation helper
 - **[Post-Restart Hooks](HOOKS.md)** - Run custom fixups after each stack's containers restart
+- **[Compression Configuration](COMPRESSION.md)** - Compression methods, levels, and parallel processing
+- **[Dry-Run Mode](DRY_RUN.md)** - Simulate backups without making changes
+- **[Safety Features & Error Handling](SAFETY_FEATURES.md)** - Built-in checks that prevent common failure scenarios
+- **[OS Compatibility](OS_COMPATIBILITY.md)** - Supported Linux distributions and detection
+- **[Homelab Setup Example](HOMELAB_SETUP.md)** - Example deployment on a home lab host
+- **[Security Policy](SECURITY.md)** - Vulnerability reporting and security posture
 
 ## Requirements
 
