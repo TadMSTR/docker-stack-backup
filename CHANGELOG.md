@@ -1,5 +1,43 @@
 # Changelog
 
+## [0.4.4] — 2026-07-26
+
+### Fixed
+
+- **Elevated backups aborted before `sudo` ever ran — total backup coverage loss under
+  `ELEVATION_CMD` (DSBAK-10 / #23).** `create_compressed_archive_elevated()` in `lib.sh`
+  gated the elevated path on `[[ ! -x "$ELEVATION_HELPER_PATH" ]]`. That tests the execute
+  bit **from the unprivileged caller's perspective**, but the helper is installed
+  `root:root 0750` exactly as `SECURITY.md`/`ELEVATION.md` require — so the caller has no
+  execute bit on it *by design*, which is the entire reason `ELEVATION_CMD` (sudo/doas)
+  exists. The check therefore failed for every stack and returned 1 before elevation was
+  ever attempted, aborting the backup of every stack. This is a logic contradiction with
+  the elevation threat model: it demanded the caller hold a permission the design
+  deliberately withholds. Replaced with an existence-and-regular-file test
+  (`[[ ! -f ... ]]`); whether *root* can execute the helper is what matters, and
+  `ELEVATION_CMD` surfaces any genuine exec failure with a clear error. Same
+  wrong-perspective class as DSBAK-6 (`EUID`).
+- **Interactive selection prompts corrupted every choice (DSBAK-11 / #22).**
+  `prompt_input()` in `docker-stack-backup-manual.sh` (and the identical function in
+  `docker-stack-restore.sh`) wrote its prompt to **stdout**, but is called as
+  `selection=$(prompt_input ...)` — so `$(...)` captured the prompt text (plus ANSI
+  codes) concatenated with the user's input, and the caller's word-split never matched a
+  valid index ("No valid stacks selected" regardless of input). Prompts now go to stderr;
+  only the `read` result reaches stdout.
+- **`docker-stack-restore.sh` preview could abort under `set -e`/`pipefail` (DSBAK-9 /
+  #24).** Two unguarded pipelines — `find ... | wc -l` (`select_timestamp()`) and
+  `tar -tf ... | wc -l` (`preview_backup()`) — would kill the whole script if `find`/`tar`
+  errored (e.g. an unreadable timestamp dir or a truncated archive). Guarded with
+  `|| var=0`, matching the DSBAK-8 idiom.
+
+### Tests
+
+- `tests/create-compressed-archive-elevated.bats` — regression for DSBAK-10: with
+  `ELEVATION_CMD=sudo` and a helper the caller cannot execute (mode `0600`, standing in
+  for `root:root 0750`), asserts the elevated path reaches the elevation call (via a
+  `sudo` PATH stub) instead of aborting at the precondition; plus fail-closed coverage for
+  a missing helper, an unset `ELEVATION_HELPER_PATH`, and a non-standard tar layout.
+
 ## [0.4.3] — 2026-07-14
 
 ### Fixed

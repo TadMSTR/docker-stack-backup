@@ -139,10 +139,13 @@ prompt_input() {
     local prompt="$1"
     local default="${2:-}"
     
+    # Prompt to stderr: this function's stdout is captured via $(prompt_input ...),
+    # so writing the prompt to stdout would concatenate it into the returned value
+    # and corrupt every selection (DSBAK-11 / #22). Only the read result goes to stdout.
     if [[ -n "$default" ]]; then
-        echo -e -n "${CYAN}$prompt [$default]: ${NC}"
+        echo -e -n "${CYAN}$prompt [$default]: ${NC}" >&2
     else
-        echo -e -n "${CYAN}$prompt: ${NC}"
+        echo -e -n "${CYAN}$prompt: ${NC}" >&2
     fi
     
     read -r input

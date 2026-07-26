@@ -654,8 +654,16 @@ create_compressed_archive_elevated() {
         log_error "ELEVATION_CMD=${ELEVATION_CMD} but ELEVATION_HELPER_PATH is not set"
         return 1
     fi
-    if [[ ! -x "$ELEVATION_HELPER_PATH" ]]; then
-        log_error "ELEVATION_HELPER_PATH not found or not executable: $ELEVATION_HELPER_PATH"
+    # Test existence only, NOT caller-executability. The helper is installed
+    # root:root 0750 by design (see SECURITY.md/ELEVATION.md), so the unprivileged
+    # caller deliberately has no execute bit on it — that is the whole reason
+    # ELEVATION_CMD exists. A `[[ -x ]]` test here runs from the caller's
+    # perspective and so ALWAYS fails for a correctly-installed helper, aborting
+    # every backup before sudo is ever reached (DSBAK-10 / #23). Whether root can
+    # execute the helper is what matters; let ELEVATION_CMD surface any genuine
+    # exec failure with a clear error.
+    if [[ ! -f "$ELEVATION_HELPER_PATH" ]]; then
+        log_error "ELEVATION_HELPER_PATH not found: $ELEVATION_HELPER_PATH"
         return 1
     fi
 
