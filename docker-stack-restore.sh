@@ -56,10 +56,13 @@ prompt_input() {
     local prompt="$1"
     local default="${2:-}"
     
+    # Prompt to stderr: this function's stdout is captured via $(prompt_input ...),
+    # so writing the prompt to stdout would concatenate it into the returned value
+    # and corrupt every selection (same class as DSBAK-11 / #22 in the manual script).
     if [[ -n "$default" ]]; then
-        echo -e -n "${CYAN}$prompt [$default]: ${NC}"
+        echo -e -n "${CYAN}$prompt [$default]: ${NC}" >&2
     else
-        echo -e -n "${CYAN}$prompt: ${NC}"
+        echo -e -n "${CYAN}$prompt: ${NC}" >&2
     fi
     
     read -r input
@@ -131,7 +134,10 @@ select_timestamp() {
         local time_part="${timestamp#*_}"
         local formatted_date; formatted_date=$(date -d "${date_part:0:4}-${date_part:4:2}-${date_part:6:2}" +"%B %d, %Y" 2>/dev/null || echo "$date_part")
         local formatted_time="${time_part:0:2}:${time_part:2:2}:${time_part:4:2}"
-        local stack_count; stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l)
+        # Guard against set -e/pipefail abort: a find or wc failure (e.g. a timestamp
+        # dir that became unreadable between listing and now) must not kill the whole
+        # preview — fall back to 0 (DSBAK-9 / #24, same class as DSBAK-8).
+        local stack_count; stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || stack_count=0
         
         echo -e "  ${GREEN}$i)${NC} $formatted_date at $formatted_time (${stack_count} stacks)"
         ((i++))
@@ -204,7 +210,9 @@ preview_backup() {
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
     tar -tf "$selected_backup_file" | head -20
 
-    local total_files; total_files=$(tar -tf "$selected_backup_file" | wc -l)
+    # Guard against set -e/pipefail abort: a truncated/corrupt archive makes tar -tf
+    # exit non-zero, which would kill the preview mid-run — fall back to 0 (DSBAK-9 / #24).
+    local total_files; total_files=$(tar -tf "$selected_backup_file" | wc -l) || total_files=0
     if [[ $total_files -gt 20 ]]; then
         echo -e "${YELLOW}... and $((total_files - 20)) more files${NC}"
     fi
