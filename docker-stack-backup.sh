@@ -375,7 +375,14 @@ backup_stack() {
     
     # Create a temporary directory for organizing backup contents
     local temp_dir; temp_dir=$(mktemp -d)
-    trap 'rm -rf "$temp_dir"' RETURN
+    # Bash RETURN traps are global: an un-disarmed `trap ... RETURN` set here stays
+    # armed after backup_stack() returns and then re-fires on every later function
+    # return (e.g. main()), where $temp_dir is out of scope — aborting under `set -u`
+    # with "temp_dir: unbound variable" and forcing a nonzero exit even on a fully
+    # successful backup (latent until a real elevated run first reached this point).
+    # Disarm the trap as part of its own action so it fires exactly once, for this
+    # function's return, and never leaks to outer frames.
+    trap 'rm -rf "$temp_dir"; trap - RETURN' RETURN
     
     # Copy compose file to temp directory
     cp "$compose_file" "$temp_dir/"
