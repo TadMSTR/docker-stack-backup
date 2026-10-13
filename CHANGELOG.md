@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.5.1] — 2026-10-13
+
+The restore wizard reaches its confirmation prompt. It never had before, on any host.
+
+### Fixed
+
+- **Step 2 no longer aborts with `timestamps: unbound variable`** (#1094). `select_timestamp`
+  filled its array inside `for … done | sort -r`. The pipe ran the loop in a subshell, so
+  the array was never set in the wizard itself, and `set -u` stopped it. The bug dates from
+  the first commit. It is now `mapfile` from a process substitution, still newest-first.
+- **Step 4 no longer dies previewing a real archive.** `tar -tf | head -20` under
+  `pipefail`: once `head` had its 20 lines, `tar` died of SIGPIPE and `set -e` ended the
+  wizard. This happened on any archive whose listing outgrew the pipe buffer, which means
+  every real one. It went unnoticed only because Step 2 always failed first.
+- **An empty backup dir now gets its own error.** With no host dirs (Step 1) or no
+  archives (Step 3), the wizard printed `unbound variable` instead of "No backup hosts
+  found" / "No stack backups found". The arrays are now initialised empty.
+- `docker-stack-restore.sh` and `backup-verify.sh` are tracked as executable (100755), so
+  `sudo ./docker-stack-restore.sh` works without `bash` in front (#1093, part 1).
+
+### Tests
+
+- `tests/restore-wizard.bats` drives Steps 1-4 through piped input to the "Proceed with
+  restore?" prompt and answers `n`. It covers newest-first ordering, `.tar.gz` and `.tar`
+  stacks, and `.incomplete` files being skipped. The fixture archive's listing is larger
+  than the pipe buffer. The script now runs `main` only when executed, so the tests can
+  source it and call the steps without root. One more test runs `main` end to end as
+  root in a user namespace (`unshare -r`); it skips where user namespaces are unavailable.
+
 ## [0.5.0] — 2026-10-13
 
 A backup run now changes nothing except producing archives.

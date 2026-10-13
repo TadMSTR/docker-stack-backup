@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.5.0"
+DSB_VERSION="0.5.1"
 
 #######################################
 # OS Detection

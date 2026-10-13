@@ -75,7 +75,7 @@ prompt_input() {
 select_hostname() {
     print_section "Step 1: Select Host"
     
-    local -a hostnames
+    local -a hostnames=()
     local i=1
     
     for host_dir in "$BACKUP_BASE"/*; do
@@ -114,14 +114,20 @@ select_timestamp() {
     print_section "Step 2: Select Backup Date"
     
     local host_dir="$BACKUP_BASE/$selected_hostname"
-    local -a timestamps
+    local -a timestamps=()
     local i=1
     
-    for backup_dir in "$host_dir"/*; do
-        if [[ -d "$backup_dir" ]]; then
-            timestamps+=("$(basename "$backup_dir")")
-        fi
-    done | sort -r
+    # mapfile from a process substitution, not `for … done | sort -r`: the pipe ran the
+    # loop in a subshell, so the parent's array was never set and `set -u` aborted at the
+    # count below ("timestamps: unbound variable"). The wizard never got past this step
+    # (#1094).
+    mapfile -t timestamps < <(
+        for backup_dir in "$host_dir"/*; do
+            if [[ -d "$backup_dir" ]]; then
+                basename "$backup_dir"
+            fi
+        done | sort -r
+    )
     
     if [[ ${#timestamps[@]} -eq 0 ]]; then
         log_error "No backups found for host $selected_hostname"
@@ -162,8 +168,8 @@ select_stack() {
     print_section "Step 3: Select Stack to Restore"
     
     local backup_dir="$BACKUP_BASE/$selected_hostname/$selected_timestamp"
-    local -a stacks
-    local -a stack_files
+    local -a stacks=()
+    local -a stack_files=()
     local i=1
 
     for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
@@ -208,7 +214,10 @@ preview_backup() {
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
-    tar -tf "$selected_backup_file" | head -20
+    # `|| true`: once head has its 20 lines it exits, tar dies of SIGPIPE (141), and
+    # pipefail + set -e aborted the wizard here for any archive longer than the pipe
+    # buffer — i.e. every real one (#1094, found driving the wizard past Step 2).
+    tar -tf "$selected_backup_file" | head -20 || true
 
     # Guard against set -e/pipefail abort: a truncated/corrupt archive makes tar -tf
     # exit non-zero, which would kill the preview mid-run — fall back to 0 (DSBAK-9 / #24).
@@ -418,5 +427,8 @@ main() {
     log "========================================="
 }
 
-# Run main function
-main "$@"
+# Run main function — only when executed, so tests can source the script and drive
+# the steps without root (main's EUID check).
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
