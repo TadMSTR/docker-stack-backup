@@ -11,11 +11,12 @@ The restore wizard reaches its confirmation prompt. It never had before, on any 
   the array was never set in the wizard itself, and `set -u` stopped it. The bug dates from
   the first commit. It is now `mapfile` from a process substitution, still newest-first.
 - **Step 4 no longer dies previewing a real archive.** `tar -tf | head -20` under
-  `pipefail`: once `head` had its 20 lines, `tar` died of SIGPIPE and `set -e` ended the
-  wizard. This happened on any archive whose listing outgrew the pipe buffer, which means
-  every real one. It went unnoticed only because Step 2 always failed first. Only
-  SIGPIPE is ignored now. Any other `tar` error logs a warning that the archive may be
-  corrupt or truncated, before you are asked to proceed.
+  `pipefail`: once `head` had its 20 lines, `tar` died of SIGPIPE (or exited 2 on EPIPE
+  where SIGPIPE is ignored) and `set -e` ended the wizard. This happened on any archive
+  whose listing outgrew the pipe buffer, which means every real one. It went unnoticed
+  only because Step 2 always failed first. The preview now uses `sed -n '1,20p'`, which
+  reads to the end. A `tar` error is then a real one, and it logs a warning that the
+  archive may be corrupt or truncated before you are asked to proceed.
 - **An empty backup dir now gets its own error.** With no host dirs (Step 1) or no
   archives (Step 3), the wizard printed `unbound variable` instead of "No backup hosts
   found" / "No stack backups found". The arrays are now initialised empty.

@@ -4,7 +4,8 @@
 #   - Step 2 filled its timestamps array inside `for … done | sort -r`, a subshell, so the
 #     array stayed unset and `set -u` aborted ("timestamps: unbound variable") (#1094).
 #   - Step 4 piped `tar -tf` into `head -20`; on an archive whose listing outgrows the
-#     pipe buffer tar dies of SIGPIPE and pipefail + set -e killed the preview.
+#     pipe buffer tar dies of SIGPIPE (or exits 2 on EPIPE where SIGPIPE is ignored, as
+#     on GitHub runners) and pipefail + set -e killed the preview.
 # Every test answers "n" at the confirmation, so nothing past Step 4 runs.
 
 setup() {
@@ -106,14 +107,14 @@ _drive_steps() {
     [[ "$output" != *"unbound variable"* ]]
 }
 
-@test "Step 4 warns when the archive cannot be listed (corrupt), but not on SIGPIPE" {
+@test "Step 4 warns when the archive cannot be listed (corrupt), not on a long listing" {
     printf 'not-a-tar-archive' > "$HOST_DIR/20261013_020000/beta.tar"
     _drive_steps $'1\n1\n2\nn'
     [ "$status" -eq 0 ]
     [[ "$output" == *"Could not list"*"beta.tar (tar exit 2)"* ]]
     [[ "$output" == *"Restore cancelled."* ]]
 
-    # alpha's listing is cut short by head (tar gets SIGPIPE): no warning.
+    # alpha's listing is longer than the 20 lines shown: no warning.
     _drive_steps $'1\n1\n1\nn'
     [ "$status" -eq 0 ]
     [[ "$output" != *"Could not list"* ]]

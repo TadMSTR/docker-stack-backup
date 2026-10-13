@@ -214,13 +214,14 @@ preview_backup() {
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
-    # Once head has its 20 lines it exits and tar dies of SIGPIPE (141); pipefail + set -e
-    # aborted the wizard here for any archive longer than the pipe buffer — i.e. every
-    # real one (#1094, found driving the wizard past Step 2). Ignore 141 only: any other
-    # tar status (head exits 0, so pipefail reports tar's) means the archive is damaged.
+    # sed, not head: head exits after 20 lines, and tar then dies of SIGPIPE (or, where
+    # SIGPIPE is ignored, fails with EPIPE and exits 2). pipefail + set -e aborted the
+    # wizard here for any archive longer than the pipe buffer, i.e. every real one (#1094,
+    # found driving the wizard past Step 2). sed reads to EOF, so a non-zero status
+    # (sed exits 0, so pipefail reports tar's) means tar could not read the archive.
     local list_rc=0
-    tar -tf "$selected_backup_file" | head -20 || list_rc=$?
-    if [[ $list_rc -ne 0 && $list_rc -ne 141 ]]; then
+    tar -tf "$selected_backup_file" | sed -n '1,20p' || list_rc=$?
+    if [[ $list_rc -ne 0 ]]; then
         log_warning "Could not list $selected_backup_file (tar exit $list_rc) — the archive may be corrupt or truncated"
     fi
 
