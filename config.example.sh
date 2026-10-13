@@ -43,9 +43,24 @@ ELEVATION_CMD="none"              # none | sudo | doas
 ELEVATION_HELPER_PATH=""          # root-owned validating helper; required if ELEVATION_CMD != none
                                   # e.g. /usr/local/sbin/docker-backup-tar-create.sh
 
-# Retention (cleanup-old-backups.sh)
+# Stacks that have appdata but no running containers.
+# true (default): archive them as they are — nothing is stopped or started.
+# false: skip them; they are reported as skipped with reason "not-running".
+BACKUP_STOPPED_STACKS=true
+
+# Free-space preflight floor in GB. The run requires the larger of this and
+# 1.2 x the size of this host's most recent previous run.
+MIN_FREE_GB=5           # integer 0-1048576; an invalid value stops the run
+
+# Restart after backup: attempts and seconds between them
+MAX_RESTART_ATTEMPTS=3
+RESTART_RETRY_DELAY=5
+
+# Retention (cleanup-old-backups.sh reads these from the ENVIRONMENT, not config.sh;
+# set them in the cron line, e.g. `KEEP_MIN=7 RETENTION_DAYS=30 cleanup-old-backups.sh <base>`)
 RETENTION_DAYS=30
 SEARCH_DEPTH=2
+KEEP_MIN=7              # always keep the newest N run dirs (with archives) per host; 0 = off
 
 # Notification toggles
 NOTIFY_ON_SUCCESS=true

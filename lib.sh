@@ -7,6 +7,10 @@
 
 [[ "${BASH_SOURCE[0]}" == "$0" ]] && echo "lib.sh: source this file, do not execute directly" && exit 1
 
+# Release version, logged in every run header and included in notifications.
+# shellcheck disable=SC2034  # used in sourcing scripts
+DSB_VERSION="0.5.0"
+
 #######################################
 # OS Detection
 #######################################
@@ -102,11 +106,95 @@ release_lock() {
 }
 
 #######################################
-# Restart with retry
-# Requires: MAX_RESTART_ATTEMPTS, RESTART_RETRY_DELAY, LOG_FILE
+# Running services
+# Prints the services `docker compose ps` reports as running for the stack at $1.
+# Returns:
+#   0 — the answer can be trusted (the list may be empty: genuinely nothing running)
+#   1 — it cannot be determined: `docker compose ps` failed (YAML error, unset
+#       ${VAR:?}, …) or the cross-check below failed. Callers must treat the stack as
+#       FAILED, never as stopped — an empty list from a failed `ps` once sent a running
+#       stack down the "archive as-is" path.
+#   3 — compose reports nothing running, but `docker ps` sees running containers whose
+#       compose working_dir label is this stack dir. Same treatment as 1.
+# The cross-check reads container labels only, so it does not depend on the compose
+# file parsing. Label filters with the same key are ANDed by docker, hence one query per
+# spelling of the path (as given, and symlink-resolved).
+# Requires: LOG_FILE (compose/docker stderr is appended there)
 #######################################
-MAX_RESTART_ATTEMPTS=3
-RESTART_RETRY_DELAY=5
+get_running_services() {
+    local stack_path="$1"
+    local out rc=0
+    out=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>>"${LOG_FILE:-/dev/null}") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        return 1
+    fi
+
+    if [[ -z "$out" ]]; then
+        local resolved; resolved=$(cd "$stack_path" && pwd -P) || resolved="$stack_path"
+        local dir live
+        for dir in "$stack_path" "$resolved"; do
+            live=$(docker ps -q --filter "label=com.docker.compose.project.working_dir=$dir" --filter "status=running" 2>>"${LOG_FILE:-/dev/null}") || return 1
+            if [[ -n "$live" ]]; then
+                return 3
+            fi
+            [[ "$resolved" == "$stack_path" ]] && break
+        done
+    fi
+
+    printf '%s' "$out"
+}
+
+#######################################
+# Numeric config validation
+# validate_uint <VAR_NAME> <min> <max>: VAR must be a plain decimal integer within
+# [min, max]. The value is normalised with 10# so a leading zero is never read as octal
+# by bash arithmetic ("08" is an error there, "010" is 8), and the length cap rules out
+# int64 overflow. Logs and returns 1 on failure; the caller exits.
+#######################################
+validate_uint() {
+    local name="$1" min="$2" max="$3"
+    local val="${!name:-}"
+    if [[ ! "$val" =~ ^[0-9]+$ || ${#val} -gt 15 ]]; then
+        log_error "$name must be a non-negative integer between $min and $max (got: '$val')"
+        return 1
+    fi
+    val=$((10#$val))
+    if (( val < min || val > max )); then
+        log_error "$name must be between $min and $max (got: $val)"
+        return 1
+    fi
+    printf -v "$name" '%s' "$val"
+}
+
+# Validates every numeric setting the backup scripts do arithmetic with. A typo must
+# stop the run, not silently disable a check (e.g. MIN_FREE_GB=5G used to make the
+# free-space preflight pass).
+validate_numeric_config() {
+    local ok=0
+    validate_uint MIN_FREE_GB 0 1048576 || ok=1
+    validate_uint MAX_RESTART_ATTEMPTS 1 100 || ok=1
+    validate_uint RESTART_RETRY_DELAY 0 3600 || ok=1
+    validate_uint PARALLEL_THREADS 0 1024 || ok=1
+    return $ok
+}
+
+#######################################
+# Restart with retry
+# Starts the services that were running before the backup stopped them. Uses
+# `docker compose start`, which restarts the existing (stopped) containers: no image
+# pull, no recreation, no compose-file changes applied, container writable layers
+# kept. Only if `start` fails (e.g. a container was removed between stop and start)
+# does it fall back to `up -d --no-recreate --pull never --no-build --no-deps`, which
+# creates the missing containers of exactly these services from images already present
+# locally: no existing container is recreated, nothing is pulled, no `build:` service is
+# built (a build would fetch its base image and apply the working-tree Dockerfile), and
+# no dependency that was not running before is started. A missing image therefore fails
+# the fallback (-> CRITICAL notification) instead of being fetched.
+# Defaults are applied with ${VAR:-…} so the environment or config.sh can override.
+# Requires: LOG_FILE
+#######################################
+MAX_RESTART_ATTEMPTS="${MAX_RESTART_ATTEMPTS:-3}"
+RESTART_RETRY_DELAY="${RESTART_RETRY_DELAY:-5}"
 
 restart_stack_with_retry() {
     local stack_path="$1"
@@ -120,11 +208,30 @@ restart_stack_with_retry() {
         # SECURITY[accepted]: $running_containers is intentionally unquoted — word-splitting
         # passes each service name as a separate argument to docker compose. Values come from
         # `docker compose ps --services` (operator-controlled). Audit: 2026-06-19/docker-stack-backup-2026-06.
+        local started=false
         # shellcheck disable=SC2086
-        if (cd "$stack_path" && docker compose up -d $running_containers 2>&1 | tee -a "$LOG_FILE"); then
+        if (cd "$stack_path" && docker compose start $running_containers 2>&1 | tee -a "$LOG_FILE"); then
+            started=true
+        else
+            log_warning "docker compose start failed for $stack_name — falling back to the deploy path: up -d --no-recreate --pull never --no-build --no-deps"
+            # shellcheck disable=SC2086
+            if (cd "$stack_path" && docker compose up -d --no-recreate --pull never --no-build --no-deps $running_containers 2>&1 | tee -a "$LOG_FILE"); then
+                started=true
+            fi
+        fi
+
+        if [[ "$started" == true ]]; then
             sleep 2
-            local started_count; started_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || started_count=0
+            local now_running; now_running=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null) || now_running=""
             local expected_count; expected_count=$(echo "$running_containers" | wc -w)
+            # Count the expected services that are running. A dependency compose
+            # started on its own is not one of them and must not skew the count.
+            local started_count=0 svc
+            for svc in $running_containers; do
+                if grep -qxF "$svc" <<< "$now_running"; then
+                    started_count=$((started_count + 1))
+                fi
+            done
 
             if [[ $started_count -eq $expected_count ]]; then
                 log_success "All containers started successfully"
@@ -136,17 +243,17 @@ restart_stack_with_retry() {
 
         if [[ $attempt -lt $MAX_RESTART_ATTEMPTS ]]; then
             log_warning "Restart failed, waiting ${RESTART_RETRY_DELAY}s before retry..."
-            sleep $RESTART_RETRY_DELAY
+            sleep "$RESTART_RETRY_DELAY"
         fi
 
-        ((attempt++))
+        attempt=$((attempt + 1))
     done
 
     log_error "Failed to restart stack after $MAX_RESTART_ATTEMPTS attempts"
     log_error "Stack: $stack_name"
     log_error "Containers that should be running: $running_containers"
     log_error "Manual intervention required!"
-    log_error "To restart manually: cd $stack_path && docker compose up -d $running_containers"
+    log_error "To restart manually: cd $stack_path && docker compose start $running_containers"
 
     send_critical_restart_failure "$stack_name" "$stack_path" "$running_containers"
 
@@ -197,9 +304,10 @@ send_critical_restart_failure() {
 Stack: $stack_name
 Host: $HOSTNAME
 Containers: $containers
+Version: ${DSB_VERSION}
 
 Manual restart command:
-cd $stack_path && docker compose up -d $containers
+cd $stack_path && docker compose start $containers
 
 Check logs:
 $LOG_FILE"
@@ -426,6 +534,7 @@ send_notifications() {
     local skipped="$3"
     local failed="$4"
     local total="$5"
+    local details="${6:-}"
 
     if [[ "$status" == "success" ]] && [[ "${NOTIFY_ON_SUCCESS:-true}" != true ]]; then
         return 0
@@ -444,11 +553,12 @@ send_notifications() {
         message="Backup completed successfully
 
 ✓ Successfully backed up: $backed_up
-⊘ Skipped (no appdata): $skipped
+⊘ Skipped: $skipped
 ✗ Failed: $failed
 ━━━━━━━━━━━━━━━━━━━━
 Total stacks: $total
 Host: $HOSTNAME
+Version: ${DSB_VERSION}
 Time: $(date +'%Y-%m-%d %H:%M:%S')"
     else
         title="Docker Backup FAILED - $HOSTNAME"
@@ -457,14 +567,23 @@ Time: $(date +'%Y-%m-%d %H:%M:%S')"
         message="Backup completed with errors
 
 ✓ Successfully backed up: $backed_up
-⊘ Skipped (no appdata): $skipped
+⊘ Skipped: $skipped
 ✗ FAILED: $failed
 ━━━━━━━━━━━━━━━━━━━━
 Total stacks: $total
 Host: $HOSTNAME
+Version: ${DSB_VERSION}
 Time: $(date +'%Y-%m-%d %H:%M:%S')
 
 Check logs: ${LOG_FILE:-}"
+    fi
+
+    # SECURITY[accepted]: the per-stack details (stack names, skip reasons, stopped and
+    # failed stacks) go to every enabled notification channel, third-party ones included.
+    # Names are operator-controlled directory names; every channel passes the body as data
+    # (python argv JSON, --form-string, -d body, mail body). Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-05).
+    if [[ -n "$details" ]]; then
+        message="$message"$'\n\n'"$details"
     fi
 
     # Ntfy honors NTFY_URGENT_ONLY: when true, ntfy fires on failure only — even if
@@ -685,6 +804,65 @@ create_compressed_archive_elevated() {
 }
 
 #######################################
+# Atomic archive creation
+# Writes the archive to <name>.incomplete next to the final file and renames it into
+# place only when create_compressed_archive succeeds; on failure the partial file is
+# deleted. The temporary name deliberately does not match `*.tar` / `*.tar.*`, the
+# globs backup-verify.sh and docker-stack-restore.sh use to find backups, so an
+# interrupted or failed archive is never mistaken for a backup.
+#   $1 = final archive path (ending in get_compression_extension), rest = tar args
+#######################################
+# SECURITY[deferred]: archives (and the .incomplete file) take the process umask, so on
+# the backup share they are world-readable (0664) although they hold full appdata. The
+# fix (umask 077) waits on a restore/verify read path that works when root is squashed
+# on an NFS destination. Target: docker-stack-backup-2026-10 p3/p5. Ticket #1089 (id 1172).
+# Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-04).
+create_archive_atomic() {
+    local final_file="$1"; shift
+    local ext; ext=$(get_compression_extension)
+    local partial_file="${final_file%"$ext"}.incomplete"
+
+    rm -f "$partial_file"
+    if create_compressed_archive "$partial_file" "$@" && mv -f "$partial_file" "$final_file"; then
+        return 0
+    fi
+    rm -f "$partial_file"
+    return 1
+}
+
+#######################################
+# Free-space requirement
+# Prints the free space a run needs, in bytes: the larger of MIN_FREE_GB and 1.2 x the
+# size of this host's most recent previous run dir under BACKUP_DEST/HOSTNAME (run dirs
+# are named YYYYMMDD_HHMMSS, so the last in sort order is the newest). With no previous
+# run, MIN_FREE_GB alone applies.
+# Requires: BACKUP_DEST, HOSTNAME, TIMESTAMP; optional MIN_FREE_GB (default 5)
+#######################################
+required_free_bytes() {
+    local min_bytes=$(( ${MIN_FREE_GB:-5} * 1024 * 1024 * 1024 ))
+    local host_dir="$BACKUP_DEST/$HOSTNAME"
+    local prev_dir=""
+
+    if [[ -d "$host_dir" ]]; then
+        prev_dir=$(find "$host_dir" -mindepth 1 -maxdepth 1 -type d \
+            -name '[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9][0-9][0-9]' \
+            ! -name "${TIMESTAMP:-}" 2>/dev/null | sort | tail -n1) || prev_dir=""
+    fi
+
+    local estimate=0
+    if [[ -n "$prev_dir" ]]; then
+        local prev_bytes; prev_bytes=$(du -sb "$prev_dir" 2>/dev/null | cut -f1) || prev_bytes=0
+        estimate=$(( ${prev_bytes:-0} * 12 / 10 ))
+    fi
+
+    if [[ $estimate -gt $min_bytes ]]; then
+        echo "$estimate"
+    else
+        echo "$min_bytes"
+    fi
+}
+
+#######################################
 # Privilege check
 # Requires root UNLESS ELEVATION_CMD is configured — in that case the script is
 # expected to run unprivileged and elevate only the one operation the helper covers
@@ -738,6 +916,18 @@ dockhand_stack_base() {
     else
         echo "$DOCKHAND_BASE"
     fi
+}
+
+#######################################
+# join_by <sep> <items...> — prints items joined by sep
+#######################################
+join_by() {
+    local sep="$1"; shift
+    local out="" item
+    for item in "$@"; do
+        out+="${out:+$sep}$item"
+    done
+    printf '%s' "$out"
 }
 
 #######################################

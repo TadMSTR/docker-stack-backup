@@ -131,10 +131,18 @@ Each backup tarball contains:
 
 1. **Discovery** - Scans Dockhand stacks for those with appdata bind mounts
 2. **State Capture** - Records which containers are running
-3. **Graceful Stop** - Stops running containers in the stack
-4. **Backup** - Creates tar.gz of compose files + appdata
-5. **Restore State** - Restarts only previously running containers
-6. **Notification** - Sends status to configured services
+3. **Graceful Stop** - `docker compose stop`: the containers are stopped, not removed
+4. **Backup** - Writes the archive as `<stack>.incomplete`, renamed to `<stack>.tar[.ext]` only when it completes
+5. **Restore State** - `docker compose start` on only the previously running services. The same containers come back: no image pull, no recreation, no compose or image change applied
+6. **Notification** - Sends status to configured services, naming every skipped stack with its reason
+
+A stack that is already stopped is archived as it is, with nothing stopped or started
+(`BACKUP_STOPPED_STACKS=true`, the default). Set it to `false` to skip such stacks; they
+are then reported as skipped with reason `not-running`.
+
+**Backups do not deploy.** Since 0.5.0 a backup never recreates a container, so a changed
+compose file or a newly pulled image is *not* picked up at backup time. Apply those with a
+deliberate `docker compose up -d`.
 
 ## Usage Examples
 
@@ -200,6 +208,9 @@ BACKUP_BASE=/mnt/nas/backups/docker RETENTION_DAYS=60 cleanup-old-backups.sh
 
 # Depth-1 layout (BACKUP_BASE/YYYY-MM-DD/ instead of BACKUP_BASE/stack/YYYY-MM-DD/)
 SEARCH_DEPTH=1 cleanup-old-backups.sh
+
+# Always keep the newest 14 run dirs per host, however old (default 7; 0 disables)
+KEEP_MIN=14 cleanup-old-backups.sh /mnt/nas/backups/docker
 
 # Schedule weekly cleanup via cron
 0 3 * * 0 BACKUP_BASE=/mnt/nas/backups/docker /usr/local/bin/cleanup-old-backups.sh
@@ -309,8 +320,8 @@ docker compose ps
 # View logs
 docker compose logs
 
-# Manual restart
-docker compose up -d
+# Manual restart (same containers, nothing recreated)
+docker compose start
 ```
 
 ### Notifications Not Sent
@@ -335,7 +346,7 @@ echo "Test" | sendmail you@example.com
 
 ```bash
 apt install bats
-bats tests/cleanup-old-backups.bats
+bats tests/
 ```
 
 ## Contributing

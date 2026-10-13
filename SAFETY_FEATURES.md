@@ -75,7 +75,7 @@ sudo rm /var/run/docker-stack-backup.lock
 ```
 
 #### ✓ Sufficient Disk Space
-- Requires at least 5GB free by default
+- Requires the larger of `MIN_FREE_GB` (default 5) and 1.2 × the size of this host's most recent previous run
 - Checks actual available space
 - Prevents mid-backup disk full errors
 
@@ -117,16 +117,33 @@ Running pre-flight checks...
 
 ### Customizing Disk Space Requirements
 
-Edit the script to change minimum required space:
+Set the floor in `config.sh` (or the environment). The estimate from the previous run
+still applies when it is larger:
 
 ```bash
-# In check_disk_space function call
-check_disk_space "$BACKUP_DEST" 10  # Require 10GB instead of 5GB
+MIN_FREE_GB=10   # Require at least 10GB instead of 5GB
 ```
 
 ---
 
 ## 3. Improved Restart Error Handling
+
+### Stop/start, never recreate
+The backup stops a stack with `docker compose stop` and brings it back with
+`docker compose start <previously running services>`. The containers are never removed, so:
+
+- no image is pulled
+- no pending compose-file or image change is applied (backups do not deploy)
+- each container's writable layer is kept
+
+If `start` fails (for example a container was removed by hand while the stack was
+stopped), the attempt falls back to
+`docker compose up -d --no-recreate --pull never --no-build --no-deps`. That creates
+only the missing containers of exactly the services that were running, from images
+already present locally, and never touches the existing ones. Nothing is pulled and no
+`build:` service is built, since a build would fetch its base image and apply the
+working-tree Dockerfile. A missing image makes the fallback fail, which sends the CRITICAL
+notification. The fallback is logged as a warning naming the deploy path.
 
 ### Retry Logic
 When containers fail to start after backup:
@@ -139,6 +156,7 @@ When containers fail to start after backup:
 6. **Verify**: Check containers actually started
 
 ### Configuration
+Set in `config.sh` or the environment:
 ```bash
 MAX_RESTART_ATTEMPTS=3      # Number of retry attempts
 RESTART_RETRY_DELAY=5       # Seconds between retries
@@ -146,7 +164,7 @@ RESTART_RETRY_DELAY=5       # Seconds between retries
 
 ### What Gets Verified
 - Containers start successfully (not just command succeeds)
-- Expected number of containers are running
+- Every previously running service is running again (a dependency compose starts on its own is not counted)
 - Status checked 2 seconds after start
 
 ### Failure Handling
@@ -160,7 +178,7 @@ If restart fails after all retries:
 [ERROR] Stack: plex
 [ERROR] Containers that should be running: plex
 [ERROR] Manual intervention required!
-[ERROR] To restart manually: cd /path/to/stack && docker compose up -d plex
+[ERROR] To restart manually: cd /path/to/stack && docker compose start plex
 ```
 
 2. **Sends CRITICAL notification** (regardless of normal notification settings):
@@ -174,7 +192,7 @@ Host: debian-docker
 Containers: plex
 
 Manual restart command:
-cd /opt/dockhand/debian-docker/plex && docker compose up -d plex
+cd /opt/dockhand/debian-docker/plex && docker compose start plex
 
 Check logs:
 /var/log/docker-backup.log
@@ -225,11 +243,14 @@ cd /opt/dockhand/debian-docker/plex
 # Check what's wrong
 docker compose logs
 
-# Try starting again
-docker compose up -d
+# Try starting again (same containers)
+docker compose start
 
-# Or restart specific services
-docker compose up -d plex
+# Or specific services
+docker compose start plex
+
+# Only if the containers are gone: create them from local images
+docker compose up -d --no-recreate --pull never --no-build --no-deps
 ```
 
 ---
@@ -248,10 +269,28 @@ docker compose up -d plex
 ### During Backup
 | Issue | Action |
 |-------|--------|
-| Stack has no appdata | Skip, log warning |
-| Appdata directory missing | Skip, log warning |
-| Failed to stop stack | Abort backup, log error |
-| Failed to create backup | Abort, try to restart stack, log error |
+| Stack has no appdata | Skip (`no-appdata-reference`), log warning |
+| Appdata directory missing | Skip (`appdata-missing`), log warning |
+| Appdata directory empty | Skip (`appdata-empty`), log warning |
+| No running containers | Archive as-is, no stop/start (`BACKUP_STOPPED_STACKS=true`); or skip (`not-running`) |
+| Running state cannot be determined (`docker compose ps` fails, e.g. a compose syntax error or an unset `${VAR:?}`) | Count as failed (`compose-ps-failed`); nothing stopped or archived |
+| Compose reports nothing running but `docker ps` sees the stack dir's containers | Count as failed (`running-state-mismatch`); nothing archived |
+| Failed to stop stack | Count as failed, start what was running, log error |
+| Failed to create backup | Count as failed, delete the partial `.incomplete` file, restart stack, log error |
+
+Skipped stacks are listed by name with their reason in the run summary and in the
+notification; they are never counted as backed up.
+
+### Atomic archives
+Each archive is written as `<stack>.incomplete` and renamed to `<stack>.tar[.ext]` only
+after it completes. `backup-verify.sh` and `docker-stack-restore.sh` look for `*.tar` /
+`*.tar.*`, so a failed or interrupted archive is never mistaken for a backup. A run dir
+that ends up with no archives is removed.
+
+### Retention keeps a minimum
+`cleanup-old-backups.sh` never deletes the newest `KEEP_MIN` (default 7) run dirs per
+host, whatever their age. Only dirs holding a completed archive count toward that
+minimum, so a run of failed nights cannot push the last good backups out.
 
 ### After Backup
 | Issue | Action |

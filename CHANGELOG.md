@@ -1,5 +1,117 @@
 # Changelog
 
+## [0.5.0] — 2026-10-13
+
+A backup run now changes nothing except producing archives.
+
+### Behaviour change — read before upgrading
+
+- **Backups no longer deploy.** The backup used to stop a stack with
+  `docker compose down` and bring it back with `docker compose up -d <services>`.
+  `down` removes the containers, so `up` recreated them from whatever compose file and
+  image were on disk at 02:00. Every pending compose edit or pulled image was deployed
+  unattended, an image could be pulled (rate limits), and each container's writable layer
+  was thrown away. It now uses `docker compose stop` and `docker compose start
+  <previously running services>`: the same containers come back, unchanged. **Compose and
+  image changes are no longer applied by the backup; deploy them deliberately with
+  `docker compose up -d`.** If `start` fails, for example because a container was removed
+  while the stack was stopped, the attempt falls back to
+  `docker compose up -d --no-recreate --pull never --no-build --no-deps`. That creates
+  only the missing containers of the services that were running, from images already
+  present locally: no pull, no build, no dependency start. It is logged as a warning
+  naming the deploy path. The
+  interactive `docker-stack-backup-manual.sh` changes the same way.
+  `docker-stack-restore.sh` keeps `down`/`up`, because a restore is meant to recreate.
+- **Stopped stacks are archived.** A stack with appdata but no running containers was
+  reported as "Successfully backed up" without archiving anything. With the new
+  `BACKUP_STOPPED_STACKS=true` (the default) it is archived as it is, with nothing
+  stopped or started, and listed as `(stopped)`. With `false` it is skipped with reason
+  `not-running` and never counted as backed up.
+
+### Fixed
+
+- **Run counts match what was archived.** An empty appdata dir was also counted as
+  backed up. It is now skipped with reason `appdata-empty`. Each skipped stack carries a
+  reason (`no-appdata-reference`, `appdata-missing`, `appdata-empty`, `not-running`),
+  and the run summary and notification list skipped, stopped and failed stacks by name.
+  The existing count lines keep their wording (`Skipped (no appdata): N` in the log) so
+  log readers still match; the names follow them.
+- **No partial archives under the final name.** A failed `tar` left a truncated
+  `<stack>.tar[.ext]` that `backup-verify.sh` and `docker-stack-restore.sh` treated as a
+  backup. Archives are now written as `<stack>.incomplete` and renamed only on success;
+  the partial file is deleted on failure. This applies to the elevated helper path too, and
+  the helper's arguments are unchanged. A run dir left with no archives is removed.
+- **Cleanup can no longer delete every backup.** `cleanup-old-backups.sh` deleted every
+  run dir older than `RETENTION_DAYS`, so 30 days without a good backup meant the next
+  cleanup removed them all. New `KEEP_MIN` (env, default 7): the newest `KEEP_MIN` run dirs
+  per host that hold a completed archive are always kept. Empty or failed-run dirs don't
+  use a slot. `KEEP_MIN=0` restores the old behaviour. The CLI is unchanged (`$1` = base path).
+- **Free-space preflight sized to the real run.** It required a fixed 5 GB. It now requires
+  the larger of `MIN_FREE_GB` (new, default 5) and 1.2 × this host's most recent previous run.
+- **A stack whose running state can't be determined is failed, never archived as
+  "stopped".** If `docker compose ps` fails (a compose syntax error, or a `${VAR:?}` that
+  is unset in cron's environment), the stack is counted as failed with reason
+  `compose-ps-failed`. Before an "archive as-is" of a stopped stack, a label-based
+  `docker ps` cross-check must also agree that nothing is running
+  (`running-state-mismatch` otherwise). Without this, the new stopped-stack path would
+  have archived a live database and reported it as a clean backup. Found in the v0.5.0
+  security audit (F-01). `--dry-run` lists these under "Would fail".
+- **Numeric settings are validated and read as decimal.** `MIN_FREE_GB`,
+  `MAX_RESTART_ATTEMPTS`, `RESTART_RETRY_DELAY` and `PARALLEL_THREADS` (backup scripts),
+  and `KEEP_MIN`, `RETENTION_DAYS` and `SEARCH_DEPTH` (cleanup), must be plain integers in
+  a bounded range, or the run exits before doing anything. Leading zeros are read as
+  decimal. Before this, `MIN_FREE_GB=5G` made the free-space check pass, and
+  `KEEP_MIN=08` passed the format check, then failed as invalid octal and disabled the
+  retention floor. Found in the v0.5.0 security audit (F-03) and CodeRabbit (CR-01, CR-02).
+- **Restart verification counts only the expected services.** A dependency that compose
+  started on its own no longer skews the "N of M started" check.
+- **A failed `docker compose stop` restarts what was running** instead of leaving a
+  half-stopped stack.
+- **`--dry-run` crashed when no stack was skipped** (`skip_list: unbound variable` under
+  `set -u`). The skip list now shows each stack's reason.
+- **`docker-stack-backup-manual.sh` aborted on the first stack under `set -e`.** Its
+  `((n++))` counters return 1 when `n` is 0. It also counted skipped stacks as successes and
+  kept a non-disarming `RETURN` trap; both are fixed to match the automated script.
+
+### Added
+
+- `DSB_VERSION` in `lib.sh` (`0.5.0`), logged in every run header and included in
+  notifications.
+- `MAX_RESTART_ATTEMPTS` and `RESTART_RETRY_DELAY` can now be set from the environment as
+  well as from `config.sh`.
+- `config.example.sh` documents `BACKUP_STOPPED_STACKS`, `MIN_FREE_GB`,
+  `MAX_RESTART_ATTEMPTS`, `RESTART_RETRY_DELAY` and `KEEP_MIN`, and notes that the cleanup
+  script reads its settings from the environment.
+
+### Tests
+
+- `tests/restart-uses-start.bats`: `stop`/`start`, never `down`, and never `up` without
+  `--no-recreate`. Also covers the fallback, the manual-restart hint, env overrides and the
+  version line.
+- `tests/stopped-stack-counted.bats`: `BACKUP_STOPPED_STACKS` true/false and the
+  `appdata-missing`/`appdata-empty` reasons, in both real runs and `--dry-run`.
+- `tests/atomic-archive.bats`: a failed archive leaves no `*.tar`, `*.tar.*` or
+  `.incomplete` file, and the temporary name never matches the verify/restore globs.
+- `tests/cleanup-keep-min.bats`: 40 expired run dirs keep the newest 7. Empty or failed
+  dirs take no slot. Also covers per-host grouping, depth 1, `KEEP_MIN=0` and validation.
+- `tests/free-space-estimate.bats`: the `MIN_FREE_GB` floor against the 1.2× estimate.
+- `tests/manual-backup.bats`: the manual script completes (the `set -e` regression) and uses
+  `stop`/`start`.
+- `tests/running-state-unknown.bats`: a `compose ps` failure or a compose/docker
+  disagreement fails the stack and archives nothing, in real runs, `--dry-run` and the
+  manual script.
+- `tests/numeric-config-validation.bats`: invalid, overflowing and out-of-range values
+  are rejected; leading zeros are read as decimal (`KEEP_MIN=08` keeps 8, `010` keeps 10).
+
+### Known issue (deferred)
+
+- Archives take the process umask, so they are world-readable (0664) on the backup
+  destination although they hold full appdata. This predates 0.5.0. A `umask 077` fix
+  waits on a restore/verify read path that still works when an NFS destination squashes
+  root (a root restore reaches the share as `nobody`).
+- `tests/helpers/stub-env.bash`: a stub `docker`/`systemctl`/`sudo` and helper, so a full
+  run is tested without a daemon.
+
 ## [0.4.4] — 2026-07-26
 
 ### Fixed

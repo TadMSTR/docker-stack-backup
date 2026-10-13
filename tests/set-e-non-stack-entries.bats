@@ -49,6 +49,9 @@ EOF
     # never started, so backup_stack() exits at "no running containers" first).
     export ELEVATION_CMD=sudo COMPRESSION_METHOD=none
     export NOTIFY_ON_SUCCESS=false NOTIFY_ON_FAILURE=false
+    # Since 0.5.0 a stopped stack is archived by default; skip it instead so these
+    # tests still never reach archive creation (they test loop reach, not archiving).
+    export BACKUP_STOPPED_STACKS=false
 }
 
 teardown() {
@@ -66,7 +69,7 @@ teardown() {
     run bash "$BATS_TEST_DIRNAME/../docker-stack-backup.sh"
     [ "$status" -eq 0 ]
     # The compose project is never started, so backup_stack() correctly skips it
-    # ("no running containers") — the point under test is that the loop REACHED it
+    # (reason not-running, BACKUP_STOPPED_STACKS=false) — the point under test is that the loop REACHED it
     # at all, past the _archive non-stack entry, rather than aborting on _archive.
     [[ "$output" == *"Processing stack: zzz-realstack"* ]]
     [[ "$output" == *"Backup Summary"* ]]
