@@ -105,3 +105,16 @@ _drive_steps() {
     [[ "$output" == *"No backup hosts found in $BACKUP_BASE"* ]]
     [[ "$output" != *"unbound variable"* ]]
 }
+
+@test "Step 4 warns when the archive cannot be listed (corrupt), but not on SIGPIPE" {
+    printf 'not-a-tar-archive' > "$HOST_DIR/20261013_020000/beta.tar"
+    _drive_steps $'1\n1\n2\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Could not list"*"beta.tar (tar exit 2)"* ]]
+    [[ "$output" == *"Restore cancelled."* ]]
+
+    # alpha's listing is cut short by head (tar gets SIGPIPE): no warning.
+    _drive_steps $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Could not list"* ]]
+}

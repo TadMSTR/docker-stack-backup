@@ -214,10 +214,15 @@ preview_backup() {
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
-    # `|| true`: once head has its 20 lines it exits, tar dies of SIGPIPE (141), and
-    # pipefail + set -e aborted the wizard here for any archive longer than the pipe
-    # buffer — i.e. every real one (#1094, found driving the wizard past Step 2).
-    tar -tf "$selected_backup_file" | head -20 || true
+    # Once head has its 20 lines it exits and tar dies of SIGPIPE (141); pipefail + set -e
+    # aborted the wizard here for any archive longer than the pipe buffer — i.e. every
+    # real one (#1094, found driving the wizard past Step 2). Ignore 141 only: any other
+    # tar status (head exits 0, so pipefail reports tar's) means the archive is damaged.
+    local list_rc=0
+    tar -tf "$selected_backup_file" | head -20 || list_rc=$?
+    if [[ $list_rc -ne 0 && $list_rc -ne 141 ]]; then
+        log_warning "Could not list $selected_backup_file (tar exit $list_rc) — the archive may be corrupt or truncated"
+    fi
 
     # Guard against set -e/pipefail abort: a truncated/corrupt archive makes tar -tf
     # exit non-zero, which would kill the preview mid-run — fall back to 0 (DSBAK-9 / #24).
