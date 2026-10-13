@@ -41,6 +41,10 @@ RETENTION_DAYS="${RETENTION_DAYS:-30}"
 # Depth of dated backup dirs inside BACKUP_BASE.
 # 1 = BACKUP_BASE/YYYY-MM-DD/, 2 = BACKUP_BASE/stack/YYYY-MM-DD/
 SEARCH_DEPTH="${SEARCH_DEPTH:-2}"
+# Never delete the newest KEEP_MIN run dirs under each parent (one parent per host in
+# the depth-2 layout), whatever their age. Only dirs holding at least one completed
+# archive (*.tar / *.tar.*) count toward the minimum. 0 disables the floor.
+KEEP_MIN="${KEEP_MIN:-7}"
 LOG_FILE="${LOG_FILE:-${HOME}/logs/docker-backup-cleanup.log}"
 
 # Colors — suppressed when stdout is not a terminal (avoids escape codes in log files)
@@ -69,14 +73,25 @@ log_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "$LOG_FILE"
 }
 
+# True if $1 directly holds at least one completed archive
+dir_has_archive() {
+    [[ -n "$(find "$1" -mindepth 1 -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.*' \) -print -quit 2>/dev/null)" ]]
+}
+
 main() {
     mkdir -p "$(dirname "$LOG_FILE")"
+
+    if ! [[ "$KEEP_MIN" =~ ^[0-9]+$ ]]; then
+        log_error "KEEP_MIN must be a non-negative integer (got: '$KEEP_MIN')"
+        exit 1
+    fi
 
     log "========================================="
     log "Starting backup cleanup (OS: ${OS_TYPE})"
     log "Backup base:  $BACKUP_BASE"
     log "Retention:    $RETENTION_DAYS days"
     log "Search depth: $SEARCH_DEPTH"
+    log "Keep minimum: $KEEP_MIN per parent dir"
     log "========================================="
 
     if [[ ! -d "$BACKUP_BASE" ]]; then
@@ -86,8 +101,34 @@ main() {
 
     local total_removed=0
     local total_size=0
+    local kept_by_min=0
 
-    while IFS= read -r backup_dir; do
+    # Protected set: per parent dir, the newest KEEP_MIN run dirs (by mtime, the same
+    # clock retention uses) that hold a completed archive. Empty or failed-run dirs
+    # never take a slot.
+    declare -A protected=()
+    if [[ $KEEP_MIN -gt 0 ]]; then
+        local parent entry dir kept
+        while IFS= read -r -d '' parent; do
+            kept=0
+            while IFS= read -r -d '' entry; do
+                dir="${entry#* }"
+                if dir_has_archive "$dir"; then
+                    protected["$dir"]=1
+                    kept=$((kept + 1))
+                    [[ $kept -ge $KEEP_MIN ]] && break
+                fi
+            done < <(find "$parent" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | sort -z -r -n)
+        done < <(find "$BACKUP_BASE" -mindepth "$((SEARCH_DEPTH - 1))" -maxdepth "$((SEARCH_DEPTH - 1))" -type d -print0)
+    fi
+
+    while IFS= read -r -d '' backup_dir; do
+        if [[ -n "${protected["$backup_dir"]:-}" ]]; then
+            log "Keeping past retention (KEEP_MIN): $backup_dir"
+            kept_by_min=$((kept_by_min + 1))
+            continue
+        fi
+
         local size
         size=$(du -sb "$backup_dir" | cut -f1)
         log "Removing old backup: $backup_dir ($(numfmt --to=iec-i --suffix=B "$size"))"
@@ -98,11 +139,12 @@ main() {
         else
             log_error "Failed to remove: $backup_dir"
         fi
-    done < <(find "$BACKUP_BASE" -mindepth "$SEARCH_DEPTH" -maxdepth "$SEARCH_DEPTH" -type d -mtime +"$RETENTION_DAYS")
+    done < <(find "$BACKUP_BASE" -mindepth "$SEARCH_DEPTH" -maxdepth "$SEARCH_DEPTH" -type d -mtime +"$RETENTION_DAYS" -print0)
 
     log "========================================="
     log "Cleanup Summary:"
     log "Directories removed: $total_removed"
+    log "Kept $kept_by_min past retention by KEEP_MIN ($KEEP_MIN)"
     log "Space freed: $(numfmt --to=iec-i --suffix=B "$total_size")"
     log "========================================="
 }

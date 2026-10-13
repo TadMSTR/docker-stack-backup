@@ -29,4 +29,7 @@ Reference docs: `USAGE.md`, `SAFETY_FEATURES.md`, `DRY_RUN.md`, `COMPRESSION.md`
 
 ## Git workflow
 
-Changes can be committed directly to `main`.
+Work on a branch and open a pull request; do not commit to `main` directly. CI
+(ShellCheck at severity warning, plus `bats tests/`) must be green before merge. Releases
+are cut by pushing a `vX.Y.Z` tag after merge (the Release workflow publishes it), and
+`DSB_VERSION` in `lib.sh` must match the tag.

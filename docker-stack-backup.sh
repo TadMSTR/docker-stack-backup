@@ -56,6 +56,14 @@ if [[ -z "${LOG_FILE:-}" ]]; then
 fi
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 
+# Stacks with appdata but no running containers: archive them as they are (true), or
+# skip them with reason "not-running" (false). Their data is already quiescent, so
+# archiving them stops and starts nothing.
+BACKUP_STOPPED_STACKS="${BACKUP_STOPPED_STACKS:-true}"
+
+# Free-space floor in GB. The preflight requires max(MIN_FREE_GB, 1.2 x the previous run).
+MIN_FREE_GB="${MIN_FREE_GB:-5}"
+
 # Compression
 COMPRESSION_METHOD="${COMPRESSION_METHOD:-none}"
 COMPRESSION_LEVEL="${COMPRESSION_LEVEL:-6}"
@@ -137,7 +145,6 @@ check_docker_running() {
 
 check_disk_space() {
     local path="$1"
-    local min_free_gb="${2:-5}"  # Default: require 5GB free
     
     # Create directory if it doesn't exist
     mkdir -p "$path" 2>/dev/null || true
@@ -147,17 +154,20 @@ check_disk_space() {
         return 1
     fi
     
-    # Get available space in GB
+    # Required: max(MIN_FREE_GB, 1.2 x previous run) — see required_free_bytes in lib.sh
+    local required_bytes; required_bytes=$(required_free_bytes)
     local available_kb; available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
-    local available_gb; available_gb=$((available_kb / 1024 / 1024))
+    local available_bytes=$((available_kb * 1024))
+    local available_gb=$((available_kb / 1024 / 1024))
+    local required_gb=$(( (required_bytes + 1024 * 1024 * 1024 - 1) / 1024 / 1024 / 1024 ))
     
-    if [[ $available_gb -lt $min_free_gb ]]; then
+    if [[ $available_bytes -lt $required_bytes ]]; then
         log_error "Insufficient disk space on $path"
-        log_error "Available: ${available_gb}GB, Required: ${min_free_gb}GB"
+        log_error "Available: ${available_gb}GB, Required: ${required_gb}GB"
         return 1
     fi
     
-    log "✓ Disk space: ${available_gb}GB available on $path"
+    log "✓ Disk space: ${available_gb}GB available on $path (required: ${required_gb}GB)"
     return 0
 }
 
@@ -231,8 +241,8 @@ run_preflight_checks() {
         checks_passed=false
     fi
     
-    # Check disk space (require at least 5GB free)
-    if ! check_disk_space "$BACKUP_DEST" 5; then
+    # Check disk space (MIN_FREE_GB, or 1.2x the previous run if larger)
+    if ! check_disk_space "$BACKUP_DEST"; then
         checks_passed=false
     fi
     
@@ -268,21 +278,30 @@ stack_has_appdata() {
 simulate_backup_stack() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
+    STACK_SKIP_REASON=""
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
     if [[ -z "$compose_file" ]]; then
+        STACK_SKIP_REASON="no-compose-file"
         return 2  # Skip - no compose file
     fi
     
     # Check if stack has appdata
     if ! stack_has_appdata "$compose_file"; then
+        STACK_SKIP_REASON="no-appdata-reference"
         return 2  # Skip
     fi
     
     local appdata_dir="$APPDATA_PATH/$stack_name"
     
     if [[ ! -d "$appdata_dir" ]]; then
+        STACK_SKIP_REASON="appdata-missing"
+        return 2  # Skip
+    fi
+    
+    if ! appdata_has_content "$appdata_dir"; then
+        STACK_SKIP_REASON="appdata-empty"
         return 2  # Skip
     fi
     
@@ -296,11 +315,16 @@ simulate_backup_stack() {
         running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running_count=0
     fi
     
+    if [[ $running_count -eq 0 && "$BACKUP_STOPPED_STACKS" != true ]]; then
+        STACK_SKIP_REASON="not-running"
+        return 2  # Skip
+    fi
+    
     # Output stack info
     if [[ $running_count -gt 0 ]]; then
         echo "  ${GREEN}✓${NC} $stack_name ($size appdata, $running_count running)"
     else
-        echo "  ${YELLOW}○${NC} $stack_name ($size appdata, stopped)"
+        echo "  ${YELLOW}○${NC} $stack_name ($size appdata, stopped — archived without stop/start)"
     fi
     
     # Return size in bytes for calculation
@@ -312,15 +336,22 @@ simulate_backup_stack() {
 #######################################
 # Backup a single stack
 #######################################
+# Return codes: 0 = backed up, 1 = failed, 2 = skipped. On 2, STACK_SKIP_REASON holds
+# one of: no-compose-file, no-appdata-reference, appdata-missing, appdata-empty,
+# not-running. On 0, STACK_BACKUP_MODE is "running" (stopped, archived, started) or
+# "stopped" (already stopped; archived without stop/start).
 backup_stack() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
+    STACK_SKIP_REASON=""
+    STACK_BACKUP_MODE=""
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
     if [[ -z "$compose_file" ]]; then
         log_warning "No compose file found for stack $stack_name"
-        return 0
+        STACK_SKIP_REASON="no-compose-file"
+        return 2
     fi
     
     log "Processing stack: $stack_name"
@@ -328,6 +359,7 @@ backup_stack() {
     # Check if stack has appdata
     if ! stack_has_appdata "$compose_file"; then
         log_warning "Stack $stack_name has no appdata bind mounts, skipping"
+        STACK_SKIP_REASON="no-appdata-reference"
         return 2  # Return 2 for skipped
     fi
     
@@ -337,20 +369,19 @@ backup_stack() {
     # (some stacks have container-specific folders like dashboards/heimdall, dashboards/homepage)
     if [[ ! -d "$appdata_dir" ]]; then
         log_warning "Appdata directory $appdata_dir not found for stack $stack_name"
+        STACK_SKIP_REASON="appdata-missing"
         return 2  # Return 2 for skipped
     fi
     
     # Check if directory has any content (direct files or subdirectories).
     # Skipped/deferred under ELEVATION_CMD — see appdata_has_content() in lib.sh.
     if ! appdata_has_content "$appdata_dir"; then
-        log_warning "Appdata directory $appdata_dir is empty for stack $stack_name"
-        return 0
+        log_warning "Appdata directory $appdata_dir is empty for stack $stack_name, skipping"
+        STACK_SKIP_REASON="appdata-empty"
+        return 2
     fi
     
-    # Create backup directory structure
     local backup_dir="$BACKUP_DEST/$HOSTNAME/$TIMESTAMP"
-    mkdir -p "$backup_dir"
-    
     local backup_ext; backup_ext=$(get_compression_extension)
     local backup_file="$backup_dir/${stack_name}${backup_ext}"
     
@@ -359,16 +390,28 @@ backup_stack() {
     local running_containers; running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
     
     if [[ -z "$running_containers" ]]; then
-        log_warning "No running containers in stack $stack_name, skipping backup"
-        return 0
+        if [[ "$BACKUP_STOPPED_STACKS" != true ]]; then
+            log_warning "No running containers in stack $stack_name, skipping (BACKUP_STOPPED_STACKS=false)"
+            STACK_SKIP_REASON="not-running"
+            return 2
+        fi
+        log "No running containers in stack $stack_name — archiving as-is (nothing to stop or start)"
+    else
+        log "Running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
     fi
     
-    log "Running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
+    mkdir -p "$backup_dir"
     
-    log "Stopping stack: $stack_name"
-    if ! (cd "$stack_path" && docker compose down); then
-        log_error "Failed to stop stack $stack_name"
-        return 1
+    # `stop`, not `down`: the containers are kept, so the restart below is a plain
+    # `start` — no recreation, no image pull, no pending compose change applied.
+    if [[ -n "$running_containers" ]]; then
+        log "Stopping stack: $stack_name"
+        if ! (cd "$stack_path" && docker compose stop); then
+            log_error "Failed to stop stack $stack_name"
+            # A partial stop leaves some services down; bring back what was running.
+            restart_stack_with_retry "$stack_path" "$running_containers" || true
+            return 1
+        fi
     fi
     
     log "Creating backup: $backup_file"
@@ -398,7 +441,8 @@ backup_stack() {
         log "Using parallel compression"
     fi
     
-    if create_compressed_archive "$backup_file" \
+    # Written to <stack>.incomplete and renamed on success — see create_archive_atomic.
+    if create_archive_atomic "$backup_file" \
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Backup created: $backup_file"
@@ -407,28 +451,28 @@ backup_stack() {
         # Restore only previously running containers
         if [[ -n "$running_containers" ]]; then
             log "Restoring previously running containers"
-            (cd "$stack_path" && docker compose up -d $running_containers)
+            restart_stack_with_retry "$stack_path" "$running_containers" || true
         fi
         return 1
     fi
     
+    if [[ -z "$running_containers" ]]; then
+        STACK_BACKUP_MODE="stopped"
+        log_success "Stack $stack_name backed up (stopped; not started)"
+        return 0
+    fi
+    
     # Start only the containers that were running before
-    # Docker Compose will automatically start any dependencies even if they weren't running
-    if [[ -n "$running_containers" ]]; then
-        log "Starting previously running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
-        log "(Docker Compose will auto-start any dependencies as needed)"
-        
-        if ! restart_stack_with_retry "$stack_path" "$running_containers"; then
-            # restart_stack_with_retry already logged and notified
-            return 1
-        fi
-    else
-        log "No containers to restart (none were running before backup)"
+    log "Starting previously running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
+    if ! restart_stack_with_retry "$stack_path" "$running_containers"; then
+        # restart_stack_with_retry already logged and notified
+        return 1
     fi
     
     # Run any configured post-restart hooks (non-fatal on hook failure)
     run_post_restart_hooks "$stack_name" "$stack_path"
     
+    STACK_BACKUP_MODE="running"
     log_success "Stack $stack_name backed up and restarted successfully"
     return 0
 }
@@ -476,6 +520,7 @@ main() {
     else
         log "Starting Docker stack backup"
     fi
+    log "Version: docker-stack-backup $DSB_VERSION"
     log "Hostname: $HOSTNAME"
     log "OS: $OS_NAME ($OS_TYPE)"
     log "========================================="
@@ -511,7 +556,7 @@ main() {
         echo -e "${CYAN}Stacks that would be backed up:${NC}\n"
         
         # Collect skip list
-        local -a skip_list
+        local -a skip_list=()
         
         for stack_path in "$stack_base"/*; do
             if [[ ! -d "$stack_path" ]]; then
@@ -534,19 +579,13 @@ main() {
                 fi
             else
                 local stack_name; stack_name=$(basename "$stack_path")
-                
-                # Only add to skip list if it has a compose file but no appdata
-                local compose_file; compose_file=$(find_compose_file "$stack_path") || true
-                if [[ -n "$compose_file" ]]; then
-                    skip_list+=("$stack_name")
-                fi
-                
+                skip_list+=("$stack_name (${STACK_SKIP_REASON:-unknown})")
                 skipped=$((skipped + 1))
             fi
         done
         
         if [[ ${#skip_list[@]} -gt 0 ]]; then
-            echo -e "\n${YELLOW}Would skip (no appdata):${NC}\n"
+            echo -e "\n${YELLOW}Would skip:${NC}\n"
             for stack_name in "${skip_list[@]}"; do
                 echo "  ${YELLOW}○${NC} $stack_name"
             done
@@ -593,6 +632,8 @@ main() {
     
     # Normal backup mode
     
+    local -a stopped_names=() skipped_entries=() failed_names=()
+    
     # Iterate through all stacks
     for stack_path in "$stack_base"/*; do
         if [[ ! -d "$stack_path" ]]; then
@@ -608,34 +649,67 @@ main() {
         total_stacks=$((total_stacks + 1))
         
         local result=0
+        local stack_name; stack_name=$(basename "$stack_path")
         backup_stack "$stack_path" || result=$?
         
         if [[ $result -eq 0 ]]; then
             # Successfully backed up
             backed_up=$((backed_up + 1))
+            if [[ "${STACK_BACKUP_MODE:-}" == stopped ]]; then
+                stopped_names+=("$stack_name (stopped)")
+            fi
         elif [[ $result -eq 2 ]]; then
-            # Skipped (no appdata)
+            # Skipped — reason recorded by backup_stack
             skipped=$((skipped + 1))
+            skipped_entries+=("$stack_name (${STACK_SKIP_REASON:-unknown})")
         else
             # Failed
             failed=$((failed + 1))
+            failed_names+=("$stack_name")
         fi
     done
     
+    # Remove this run's timestamp dir if nothing was archived into it (rmdir only
+    # removes an empty dir, so a dir holding any archive is left alone).
+    rmdir "$BACKUP_DEST/$HOSTNAME/$TIMESTAMP" 2>/dev/null || true
+    
+    local details=""
+    if [[ ${#stopped_names[@]} -gt 0 ]]; then
+        details+="Backed up while stopped: $(join_by ', ' "${stopped_names[@]}")"$'\n'
+    fi
+    if [[ ${#skipped_entries[@]} -gt 0 ]]; then
+        details+="Skipped: $(join_by ', ' "${skipped_entries[@]}")"$'\n'
+    fi
+    if [[ ${#failed_names[@]} -gt 0 ]]; then
+        details+="Failed: $(join_by ', ' "${failed_names[@]}")"$'\n'
+    fi
+    details="${details%$'\n'}"
+    
+    # The count lines keep their pre-0.5.0 wording so existing log readers still
+    # match; the per-stack names and reasons follow them.
     log "========================================="
     log "Backup Summary:"
     log "Total stacks found: $total_stacks"
     log "Successfully backed up: $backed_up"
     log "Skipped (no appdata): $skipped"
     log "Failed: $failed"
+    if [[ ${#stopped_names[@]} -gt 0 ]]; then
+        log "Backed up while stopped: $(join_by ', ' "${stopped_names[@]}")"
+    fi
+    if [[ ${#skipped_entries[@]} -gt 0 ]]; then
+        log "Skipped stacks: $(join_by ', ' "${skipped_entries[@]}")"
+    fi
+    if [[ ${#failed_names[@]} -gt 0 ]]; then
+        log "Failed stacks: $(join_by ', ' "${failed_names[@]}")"
+    fi
     log "========================================="
     
     # Send notifications
     if [[ $failed -gt 0 ]]; then
-        send_notifications "failure" "$backed_up" "$skipped" "$failed" "$total_stacks"
+        send_notifications "failure" "$backed_up" "$skipped" "$failed" "$total_stacks" "$details"
         exit 1
     else
-        send_notifications "success" "$backed_up" "$skipped" "$failed" "$total_stacks"
+        send_notifications "success" "$backed_up" "$skipped" "$failed" "$total_stacks" "$details"
     fi
 }
 
