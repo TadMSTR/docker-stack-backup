@@ -50,7 +50,7 @@ BACKUP_STOPPED_STACKS=true
 
 # Free-space preflight floor in GB. The run requires the larger of this and
 # 1.2 x the size of this host's most recent previous run.
-MIN_FREE_GB=5
+MIN_FREE_GB=5           # integer 0-1048576; an invalid value stops the run
 
 # Restart after backup: attempts and seconds between them
 MAX_RESTART_ATTEMPTS=3

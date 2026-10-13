@@ -44,12 +44,14 @@ teardown() {
     grep -qx "compose start app" "$DOCKER_LOG"
 }
 
-@test "when start fails, falls back to 'up -d --no-recreate --pull never' and warns" {
+@test "when start fails, falls back to 'up -d --no-recreate --pull never --no-build --no-deps' and warns" {
     export STUB_START_RC=1
     run_backup
     [ "$status" -eq 0 ]
     [[ "$output" == *"falling back to the deploy path"* ]]
-    grep -qx "compose up -d --no-recreate --pull never app worker" "$DOCKER_LOG"
+    # --no-build: a build would fetch its base image and apply the working-tree
+    # Dockerfile; --no-deps: start only what was running (audit F-02).
+    grep -qx "compose up -d --no-recreate --pull never --no-build --no-deps app worker" "$DOCKER_LOG"
 
     # That is the only `up`, and it carries both guards.
     [ "$(grep -cE '^compose up' "$DOCKER_LOG")" -eq 1 ]

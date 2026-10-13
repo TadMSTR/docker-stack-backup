@@ -6,7 +6,9 @@
 #   docker     — records every invocation in $DOCKER_LOG; `compose ps --services
 #                --filter status=running` prints $STATE_FILE; `compose stop` empties
 #                it; `compose start <svcs>` / `compose up ... <svcs>` write <svcs> to it.
-#                STUB_START_RC makes `compose start` fail with that code.
+#                STUB_START_RC makes `compose start` fail with that code; STUB_PS_RC
+#                makes `compose ps` fail (as a YAML error or unset ${VAR:?} does).
+#                Plain `docker ps` (the label cross-check) prints $STUB_LIVE.
 #   systemctl  — always reports docker active.
 #   sudo       — transparent (exec "$@"), so ELEVATION_CMD=sudo runs unprivileged.
 # And $HELPER, a stand-in elevation helper that tars the standard layout to stdout.
@@ -46,10 +48,16 @@ YAML
 #!/usr/bin/env bash
 echo "$*" >> "$DOCKER_LOG"
 [[ "$1" == info ]] && exit 0
+if [[ "$1" == ps ]]; then
+    [[ -n "${STUB_LIVE:-}" ]] && echo "$STUB_LIVE"
+    exit 0
+fi
 [[ "$1" == compose ]] || exit 0
 shift
 case "$1" in
-    ps)    cat "$STATE_FILE" ;;
+    ps)
+        [[ "${STUB_PS_RC:-0}" -ne 0 ]] && { echo "stub: invalid compose project" >&2; exit "$STUB_PS_RC"; }
+        cat "$STATE_FILE" ;;
     stop)  : > "$STATE_FILE" ;;
     start)
         shift
@@ -59,7 +67,7 @@ case "$1" in
         shift
         svcs=()
         for a in "$@"; do
-            case "$a" in -d|--no-recreate|--pull|never) ;; *) svcs+=("$a") ;; esac
+            case "$a" in -d|--no-recreate|--pull|never|--no-build|--no-deps) ;; *) svcs+=("$a") ;; esac
         done
         printf '%s\n' "${svcs[@]}" > "$STATE_FILE" ;;
 esac

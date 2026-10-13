@@ -106,13 +106,90 @@ release_lock() {
 }
 
 #######################################
+# Running services
+# Prints the services `docker compose ps` reports as running for the stack at $1.
+# Returns:
+#   0 — the answer can be trusted (the list may be empty: genuinely nothing running)
+#   1 — it cannot be determined: `docker compose ps` failed (YAML error, unset
+#       ${VAR:?}, …) or the cross-check below failed. Callers must treat the stack as
+#       FAILED, never as stopped — an empty list from a failed `ps` once sent a running
+#       stack down the "archive as-is" path.
+#   3 — compose reports nothing running, but `docker ps` sees running containers whose
+#       compose working_dir label is this stack dir. Same treatment as 1.
+# The cross-check reads container labels only, so it does not depend on the compose
+# file parsing. Label filters with the same key are ANDed by docker, hence one query per
+# spelling of the path (as given, and symlink-resolved).
+# Requires: LOG_FILE (compose/docker stderr is appended there)
+#######################################
+get_running_services() {
+    local stack_path="$1"
+    local out rc=0
+    out=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>>"${LOG_FILE:-/dev/null}") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        return 1
+    fi
+
+    if [[ -z "$out" ]]; then
+        local resolved; resolved=$(cd "$stack_path" && pwd -P) || resolved="$stack_path"
+        local dir live
+        for dir in "$stack_path" "$resolved"; do
+            live=$(docker ps -q --filter "label=com.docker.compose.project.working_dir=$dir" --filter "status=running" 2>>"${LOG_FILE:-/dev/null}") || return 1
+            if [[ -n "$live" ]]; then
+                return 3
+            fi
+            [[ "$resolved" == "$stack_path" ]] && break
+        done
+    fi
+
+    printf '%s' "$out"
+}
+
+#######################################
+# Numeric config validation
+# validate_uint <VAR_NAME> <min> <max>: VAR must be a plain decimal integer within
+# [min, max]. The value is normalised with 10# so a leading zero is never read as octal
+# by bash arithmetic ("08" is an error there, "010" is 8), and the length cap rules out
+# int64 overflow. Logs and returns 1 on failure; the caller exits.
+#######################################
+validate_uint() {
+    local name="$1" min="$2" max="$3"
+    local val="${!name:-}"
+    if [[ ! "$val" =~ ^[0-9]+$ || ${#val} -gt 15 ]]; then
+        log_error "$name must be a non-negative integer between $min and $max (got: '$val')"
+        return 1
+    fi
+    val=$((10#$val))
+    if (( val < min || val > max )); then
+        log_error "$name must be between $min and $max (got: $val)"
+        return 1
+    fi
+    printf -v "$name" '%s' "$val"
+}
+
+# Validates every numeric setting the backup scripts do arithmetic with. A typo must
+# stop the run, not silently disable a check (e.g. MIN_FREE_GB=5G used to make the
+# free-space preflight pass).
+validate_numeric_config() {
+    local ok=0
+    validate_uint MIN_FREE_GB 0 1048576 || ok=1
+    validate_uint MAX_RESTART_ATTEMPTS 1 100 || ok=1
+    validate_uint RESTART_RETRY_DELAY 0 3600 || ok=1
+    validate_uint PARALLEL_THREADS 0 1024 || ok=1
+    return $ok
+}
+
+#######################################
 # Restart with retry
 # Starts the services that were running before the backup stopped them. Uses
 # `docker compose start`, which restarts the existing (stopped) containers: no image
 # pull, no recreation, no compose-file changes applied, container writable layers
 # kept. Only if `start` fails (e.g. a container was removed between stop and start)
-# does it fall back to `up -d --no-recreate --pull never`, which creates the missing
-# containers from local images without touching the existing ones.
+# does it fall back to `up -d --no-recreate --pull never --no-build --no-deps`, which
+# creates the missing containers of exactly these services from images already present
+# locally: no existing container is recreated, nothing is pulled, no `build:` service is
+# built (a build would fetch its base image and apply the working-tree Dockerfile), and
+# no dependency that was not running before is started. A missing image therefore fails
+# the fallback (-> CRITICAL notification) instead of being fetched.
 # Defaults are applied with ${VAR:-…} so the environment or config.sh can override.
 # Requires: LOG_FILE
 #######################################
@@ -136,9 +213,9 @@ restart_stack_with_retry() {
         if (cd "$stack_path" && docker compose start $running_containers 2>&1 | tee -a "$LOG_FILE"); then
             started=true
         else
-            log_warning "docker compose start failed for $stack_name — falling back to the deploy path: up -d --no-recreate --pull never"
+            log_warning "docker compose start failed for $stack_name — falling back to the deploy path: up -d --no-recreate --pull never --no-build --no-deps"
             # shellcheck disable=SC2086
-            if (cd "$stack_path" && docker compose up -d --no-recreate --pull never $running_containers 2>&1 | tee -a "$LOG_FILE"); then
+            if (cd "$stack_path" && docker compose up -d --no-recreate --pull never --no-build --no-deps $running_containers 2>&1 | tee -a "$LOG_FILE"); then
                 started=true
             fi
         fi
@@ -501,6 +578,10 @@ Time: $(date +'%Y-%m-%d %H:%M:%S')
 Check logs: ${LOG_FILE:-}"
     fi
 
+    # SECURITY[accepted]: the per-stack details (stack names, skip reasons, stopped and
+    # failed stacks) go to every enabled notification channel, third-party ones included.
+    # Names are operator-controlled directory names; every channel passes the body as data
+    # (python argv JSON, --form-string, -d body, mail body). Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-05).
     if [[ -n "$details" ]]; then
         message="$message"$'\n\n'"$details"
     fi
@@ -731,6 +812,11 @@ create_compressed_archive_elevated() {
 # interrupted or failed archive is never mistaken for a backup.
 #   $1 = final archive path (ending in get_compression_extension), rest = tar args
 #######################################
+# SECURITY[deferred]: archives (and the .incomplete file) take the process umask, so on
+# the backup share they are world-readable (0664) although they hold full appdata. The
+# fix (umask 077) waits on a restore/verify read path that works when root is squashed
+# on an NFS destination. Target: docker-stack-backup-2026-10 p3/p5. Ticket #1089 (id 1172).
+# Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-04).
 create_archive_atomic() {
     local final_file="$1"; shift
     local ext; ext=$(get_compression_extension)

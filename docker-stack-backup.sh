@@ -154,8 +154,13 @@ check_disk_space() {
         return 1
     fi
     
-    # Required: max(MIN_FREE_GB, 1.2 x previous run) — see required_free_bytes in lib.sh
-    local required_bytes; required_bytes=$(required_free_bytes)
+    # Required: max(MIN_FREE_GB, 1.2 x previous run) — see required_free_bytes in lib.sh.
+    # An unusable requirement fails the check; it must never compare as 0.
+    local required_bytes; required_bytes=$(required_free_bytes) || required_bytes=""
+    if [[ ! "$required_bytes" =~ ^[0-9]+$ ]]; then
+        log_error "Could not compute the free-space requirement (MIN_FREE_GB='${MIN_FREE_GB:-}')"
+        return 1
+    fi
     local available_kb; available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
     local available_bytes=$((available_kb * 1024))
     local available_gb=$((available_kb / 1024 / 1024))
@@ -279,6 +284,7 @@ simulate_backup_stack() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
     STACK_SKIP_REASON=""
+    STACK_FAIL_REASON=""
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
@@ -309,10 +315,19 @@ simulate_backup_stack() {
     local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
     local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
     
-    # Get running containers
+    # Get running containers. A failed check is a would-fail, never "stopped".
+    local running ps_rc=0
+    running=$(get_running_services "$stack_path") || ps_rc=$?
+    if [[ $ps_rc -eq 1 ]]; then
+        STACK_FAIL_REASON="compose-ps-failed"
+        return 1
+    elif [[ $ps_rc -eq 3 ]]; then
+        STACK_FAIL_REASON="running-state-mismatch"
+        return 1
+    fi
     local running_count=0
-    if (cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | grep -q .); then
-        running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running_count=0
+    if [[ -n "$running" ]]; then
+        running_count=$(wc -l <<< "$running")
     fi
     
     if [[ $running_count -eq 0 && "$BACKUP_STOPPED_STACKS" != true ]]; then
@@ -338,12 +353,14 @@ simulate_backup_stack() {
 #######################################
 # Return codes: 0 = backed up, 1 = failed, 2 = skipped. On 2, STACK_SKIP_REASON holds
 # one of: no-compose-file, no-appdata-reference, appdata-missing, appdata-empty,
-# not-running. On 0, STACK_BACKUP_MODE is "running" (stopped, archived, started) or
-# "stopped" (already stopped; archived without stop/start).
+# not-running. On 1, STACK_FAIL_REASON may hold compose-ps-failed or
+# running-state-mismatch. On 0, STACK_BACKUP_MODE is "running" (stopped, archived,
+# started) or "stopped" (already stopped; archived without stop/start).
 backup_stack() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
     STACK_SKIP_REASON=""
+    STACK_FAIL_REASON=""
     STACK_BACKUP_MODE=""
     
     # Find compose file
@@ -387,7 +404,20 @@ backup_stack() {
     
     # Get list of running containers before stopping
     log "Checking container states for stack: $stack_name"
-    local running_containers; running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
+    local running_containers ps_rc=0
+    running_containers=$(get_running_services "$stack_path") || ps_rc=$?
+    # An undeterminable state is a failure, never "stopped": archiving a stack that is in
+    # fact running, without stopping it, gives a crash-inconsistent archive reported as
+    # a clean backup.
+    if [[ $ps_rc -eq 1 ]]; then
+        log_error "Cannot determine running state of $stack_name: docker compose ps failed (compose file error or unset variable? see $LOG_FILE). Not archiving."
+        STACK_FAIL_REASON="compose-ps-failed"
+        return 1
+    elif [[ $ps_rc -eq 3 ]]; then
+        log_error "docker compose ps reports no running services for $stack_name, but docker has running containers for this stack dir. Not archiving a live stack."
+        STACK_FAIL_REASON="running-state-mismatch"
+        return 1
+    fi
     
     if [[ -z "$running_containers" ]]; then
         if [[ "$BACKUP_STOPPED_STACKS" != true ]]; then
@@ -530,6 +560,10 @@ main() {
         exit 1
     fi
     
+    if ! validate_numeric_config; then
+        exit 1
+    fi
+    
     # Acquire lock to prevent concurrent runs (skip in dry-run)
     if [[ "$DRY_RUN" != true ]]; then
         acquire_lock
@@ -555,8 +589,8 @@ main() {
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${CYAN}Stacks that would be backed up:${NC}\n"
         
-        # Collect skip list
-        local -a skip_list=()
+        # Collect skip and fail lists
+        local -a skip_list=() fail_list=()
         
         for stack_path in "$stack_base"/*; do
             if [[ ! -d "$stack_path" ]]; then
@@ -570,17 +604,22 @@ main() {
             fi
             
             total_stacks=$((total_stacks + 1))
-            if simulate_backup_stack "$stack_path"; then
+            local sim_rc=0
+            simulate_backup_stack "$stack_path" || sim_rc=$?
+            local stack_name; stack_name=$(basename "$stack_path")
+            if [[ $sim_rc -eq 0 ]]; then
                 backed_up=$((backed_up + 1))
                 if [[ -f /tmp/stack_size_$$ ]]; then
                     local stack_size; stack_size=$(cat /tmp/stack_size_$$)
                     total_size=$((total_size + stack_size))
                     rm -f /tmp/stack_size_$$
                 fi
-            else
-                local stack_name; stack_name=$(basename "$stack_path")
+            elif [[ $sim_rc -eq 2 ]]; then
                 skip_list+=("$stack_name (${STACK_SKIP_REASON:-unknown})")
                 skipped=$((skipped + 1))
+            else
+                fail_list+=("$stack_name (${STACK_FAIL_REASON:-unknown})")
+                failed=$((failed + 1))
             fi
         done
         
@@ -588,6 +627,13 @@ main() {
             echo -e "\n${YELLOW}Would skip:${NC}\n"
             for stack_name in "${skip_list[@]}"; do
                 echo "  ${YELLOW}○${NC} $stack_name"
+            done
+        fi
+        
+        if [[ ${#fail_list[@]} -gt 0 ]]; then
+            echo -e "\n${RED}Would fail:${NC}\n"
+            for stack_name in "${fail_list[@]}"; do
+                echo "  ${RED}✗${NC} $stack_name"
             done
         fi
         
@@ -599,6 +645,9 @@ main() {
         echo "  Total stacks found: $total_stacks"
         echo "  Would backup: ${GREEN}$backed_up${NC}"
         echo "  Would skip: ${YELLOW}$skipped${NC}"
+        if [[ $failed -gt 0 ]]; then
+            echo "  Would fail: ${RED}$failed${NC}"
+        fi
         echo ""
         echo "  Estimated backup size: ${BOLD}$total_size_human${NC}"
         echo "  Compression method: ${COMPRESSION_METHOD}"
@@ -665,7 +714,7 @@ main() {
         else
             # Failed
             failed=$((failed + 1))
-            failed_names+=("$stack_name")
+            failed_names+=("$stack_name${STACK_FAIL_REASON:+ ($STACK_FAIL_REASON)}")
         fi
     done
     

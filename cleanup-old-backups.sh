@@ -73,6 +73,25 @@ log_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "$LOG_FILE"
 }
 
+# validate_uint <VAR_NAME> <min> <max>: VAR must be a plain decimal integer within
+# [min, max]. Normalised with 10#, so a leading zero is never read as octal by bash
+# arithmetic: KEEP_MIN=08 used to pass the format check, then fail `-gt` as invalid
+# octal and silently disable the floor. The length cap rules out int64 overflow.
+validate_uint() {
+    local name="$1" min="$2" max="$3"
+    local val="${!name:-}"
+    if [[ ! "$val" =~ ^[0-9]+$ || ${#val} -gt 15 ]]; then
+        log_error "$name must be a non-negative integer between $min and $max (got: '$val')"
+        return 1
+    fi
+    val=$((10#$val))
+    if (( val < min || val > max )); then
+        log_error "$name must be between $min and $max (got: $val)"
+        return 1
+    fi
+    printf -v "$name" '%s' "$val"
+}
+
 # True if $1 directly holds at least one completed archive
 dir_has_archive() {
     [[ -n "$(find "$1" -mindepth 1 -maxdepth 1 -type f \( -name '*.tar' -o -name '*.tar.*' \) -print -quit 2>/dev/null)" ]]
@@ -81,8 +100,12 @@ dir_has_archive() {
 main() {
     mkdir -p "$(dirname "$LOG_FILE")"
 
-    if ! [[ "$KEEP_MIN" =~ ^[0-9]+$ ]]; then
-        log_error "KEEP_MIN must be a non-negative integer (got: '$KEEP_MIN')"
+    # Validate before anything is deleted.
+    local config_ok=0
+    validate_uint KEEP_MIN 0 100000 || config_ok=1
+    validate_uint RETENTION_DAYS 0 36500 || config_ok=1
+    validate_uint SEARCH_DEPTH 1 10 || config_ok=1
+    if [[ $config_ok -ne 0 ]]; then
         exit 1
     fi
 

@@ -137,9 +137,13 @@ The backup stops a stack with `docker compose stop` and brings it back with
 - each container's writable layer is kept
 
 If `start` fails (for example a container was removed by hand while the stack was
-stopped), the attempt falls back to `docker compose up -d --no-recreate --pull never`.
-That creates only the missing containers, from local images, and never touches the
-existing ones. The fallback is logged as a warning naming the deploy path.
+stopped), the attempt falls back to
+`docker compose up -d --no-recreate --pull never --no-build --no-deps`. That creates
+only the missing containers of exactly the services that were running, from images
+already present locally, and never touches the existing ones. Nothing is pulled and no
+`build:` service is built, since a build would fetch its base image and apply the
+working-tree Dockerfile. A missing image makes the fallback fail, which sends the CRITICAL
+notification. The fallback is logged as a warning naming the deploy path.
 
 ### Retry Logic
 When containers fail to start after backup:
@@ -246,7 +250,7 @@ docker compose start
 docker compose start plex
 
 # Only if the containers are gone: create them from local images
-docker compose up -d --no-recreate --pull never
+docker compose up -d --no-recreate --pull never --no-build --no-deps
 ```
 
 ---
@@ -269,6 +273,8 @@ docker compose up -d --no-recreate --pull never
 | Appdata directory missing | Skip (`appdata-missing`), log warning |
 | Appdata directory empty | Skip (`appdata-empty`), log warning |
 | No running containers | Archive as-is, no stop/start (`BACKUP_STOPPED_STACKS=true`); or skip (`not-running`) |
+| Running state cannot be determined (`docker compose ps` fails, e.g. a compose syntax error or an unset `${VAR:?}`) | Count as failed (`compose-ps-failed`); nothing stopped or archived |
+| Compose reports nothing running but `docker ps` sees the stack dir's containers | Count as failed (`running-state-mismatch`); nothing archived |
 | Failed to stop stack | Count as failed, start what was running, log error |
 | Failed to create backup | Count as failed, delete the partial `.incomplete` file, restart stack, log error |
 

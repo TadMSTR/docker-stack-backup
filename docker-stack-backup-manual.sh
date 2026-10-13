@@ -184,7 +184,11 @@ check_disk_space() {
     fi
     
     # Required: max(MIN_FREE_GB, 1.2 x previous run) — see required_free_bytes in lib.sh
-    local required_bytes; required_bytes=$(required_free_bytes)
+    local required_bytes; required_bytes=$(required_free_bytes) || required_bytes=""
+    if [[ ! "$required_bytes" =~ ^[0-9]+$ ]]; then
+        log_error "Could not compute the free-space requirement (MIN_FREE_GB='${MIN_FREE_GB:-}')"
+        return 1
+    fi
     local available_kb; available_kb=$(df -k "$path" | awk 'NR==2 {print $4}')
     local available_gb=$((available_kb / 1024 / 1024))
     local required_gb=$(( (required_bytes + 1024 * 1024 * 1024 - 1) / 1024 / 1024 / 1024 ))
@@ -518,8 +522,14 @@ backup_stack() {
     local backup_ext; backup_ext=$(get_compression_extension)
     local backup_file="$backup_dir/${stack_name}${backup_ext}"
     
-    # Get list of running containers before stopping
-    local running_containers; running_containers=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null || true)
+    # Get list of running containers before stopping. An undeterminable state is a
+    # failure, never "stopped" (see get_running_services in lib.sh).
+    local running_containers ps_rc=0
+    running_containers=$(get_running_services "$stack_path") || ps_rc=$?
+    if [[ $ps_rc -ne 0 ]]; then
+        log_error "Cannot determine running state of $stack_name (docker compose ps failed or disagrees with docker ps). Not archiving."
+        return 1
+    fi
     
     if [[ -z "$running_containers" ]]; then
         if [[ "$BACKUP_STOPPED_STACKS" != true ]]; then
@@ -734,6 +744,10 @@ main() {
     
     # Require root, unless ELEVATION_CMD is configured to elevate archive creation
     if ! require_privileged_or_elevated; then
+        exit 1
+    fi
+    
+    if ! validate_numeric_config; then
         exit 1
     fi
     
