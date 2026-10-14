@@ -182,7 +182,7 @@ STUB
     tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" -C "$src" .
     _drive_restore $'1\n1\n1\ny\n1\ny\ny'
     [ "$status" -eq 0 ]
-    [[ "$output" == *"no web/ appdata"* ]]
+    [[ "$output" == *"no web/ appdata directory"* ]]
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
     [ "$(cat "$STACK_DIR/compose.yaml")" = new-compose ]
 }
@@ -232,4 +232,196 @@ STUB
     [ ! -e "$STACK_DIR/compose.yaml" ]
     # The old file survives in the safety copy.
     [ "$(cat "$RESTORE_SAFETY_DIR"/docker-restore-backup-web-*/stack/compose.yaml)" = old-compose ]
+}
+
+@test "symlinks in the archive are not followed, and not written through at the destination" {
+    # Archive: compose.yaml -> a file outside (as root this could be /etc/shadow), and
+    # web -> a dir outside. Live stack dir: .env is a symlink to another outside file.
+    echo top-secret > "$TEST_DIR/secret"
+    mkdir -p "$TEST_DIR/outside-dir" && echo outside > "$TEST_DIR/outside-dir/x"
+    echo victim > "$TEST_DIR/victim"
+    ln -s "$TEST_DIR/victim" "$STACK_DIR/.env"
+    local src="$TEST_DIR/src4"
+    mkdir -p "$src"
+    ln -s "$TEST_DIR/secret" "$src/compose.yaml"
+    echo NEW_ENV=1 > "$src/.env"
+    ln -s "$TEST_DIR/outside-dir" "$src/web"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" --owner=0 --group=0 --numeric-owner -C "$src" .
+    _drive_restore $'1\n1\n1\ny\n2\ny'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Not restoring compose.yaml: it is a symlink in the archive"* ]]
+    # The secret was not copied in, and the old compose file was left alone.
+    [ "$(cat "$STACK_DIR/compose.yaml")" = old-compose ]
+    ! grep -rq top-secret "$STACK_DIR" "$APPDATA_PATH"
+    # .env replaced the destination symlink instead of writing through it.
+    [ ! -L "$STACK_DIR/.env" ]
+    [ "$(cat "$STACK_DIR/.env")" = NEW_ENV=1 ]
+    [ "$(cat "$TEST_DIR/victim")" = victim ]
+    # The appdata symlink member did not replace the live appdata.
+    [ ! -L "$APPDATA_PATH/web" ]
+    [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
+}
+
+@test "an archive filename with a literal \\n cannot forge a log line (audit p3a F-02)" {
+    local src="$TEST_DIR/src5" name='web\n[2026-10-14 03:00:00] FORGED Restore completed successfully'
+    mkdir -p "$src"
+    echo forged-compose > "$src/compose.yaml"
+    # Alone in the newest run dir, so it is backup 1, stack 1. Step 3 refuses the name
+    # (F-04) and logs it in the error; that line must stay one line (F-02).
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    tar -cf "$BACKUP_BASE/testhost/20261014_020000/$name.tar" -C "$src" .
+    _drive_restore $'1\n1\n1\ny\nn'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name"* ]]
+    grep -qF "[ERROR] Refusing stack name $(printf '%q' "$name")" "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
+}
+
+@test "log_* print the message as data: a literal \\n in a message stays one line (F-02)" {
+    run bash -c 'source "$1"; LOG_FILE="$2"; log_warning "a\\nb \\033[31m"' \
+        _ "$BATS_TEST_DIRNAME/../lib.sh" "$LOG_FILE"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$LOG_FILE")" -eq 1 ]
+    grep -qxF '[WARNING] a\nb \033[31m' "$LOG_FILE"
+}
+
+@test "Step 3 refuses a stack name outside [A-Za-z0-9._-] (audit p3a F-04)" {
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    : > "$BACKUP_BASE/testhost/20261014_020000/we b.tar"
+    _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'Refusing stack name we\ b'* ]]
+    ! grep -q 'compose down' "$DOCKER_LOG"
+}
+
+@test "Step 4 flags setuid and device/pipe members before Proceed (audit p3a F-03)" {
+    local src="$TEST_DIR/src6"
+    mkdir -p "$src/web"
+    echo x > "$src/web/tool" && chmod 4755 "$src/web/tool"
+    mkfifo "$src/web/fifo"
+    echo y > "$src/web/plain"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" -C "$src" web
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 member(s) are setuid/setgid or device/pipe/socket entries"* ]]
+    [[ "$output" == *"web/tool"* ]]
+    [[ "$output" == *"web/fifo"* ]]
+    [[ "$output" == *"Restore cancelled."* ]]
+}
+
+@test "space check refuses an archive declaring 19+ digits of size (audit p3a F-05)" {
+    run bash -c 'source "$1"; selected_backup_file=/dev/null; restore_mode=clean
+                 archive_extract_bytes=9223372036854775808
+                 check_restore_space /nonexistent/stack /nonexistent/appdata /tmp' _ "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"implausible total size"* ]]
+}
+
+@test "symlinked appdata is flagged at Step 5; default safety copy is called temporary (F-06)" {
+    mv "$APPDATA_PATH/web" "$TEST_DIR/real-web"
+    ln -s "$TEST_DIR/real-web" "$APPDATA_PATH/web"
+    unset RESTORE_SAFETY_DIR
+    _drive_restore $'1\n1\n1\ny\n2\ny'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"is a symlink (-> $TEST_DIR/real-web)"* ]]
+    [[ "$output" == *"which is cleaned up"* ]]
+    # The target is untouched; the link became a real dir holding the restored data.
+    [ "$(cat "$TEST_DIR/real-web/data.txt")" = old-data ]
+    [ ! -L "$APPDATA_PATH/web" ]
+    [ "$(cat "$APPDATA_PATH/web/data.txt")" = new-data ]
+}
+
+# Raw control bytes (a real LF or ESC, not a backslash sequence) in names on the share:
+# printf %s passed them through, so the refusal message and the list lines could still
+# forge a root log line or drive the terminal (audit p3a round 2, R2-01).
+_assert_no_raw_control() {
+    ! grep -q $'\033' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
+    # The only ESC bytes on the terminal are our own colour codes.
+    ! grep -q $'\033\\[2J\\|\033\\]0;' <<< "$output"
+}
+
+@test "a stack archive name with a real LF and ESC: refused, no forged line, no raw ESC (R2-01)" {
+    local name=$'web\n[2026-10-14 03:00:00] FORGED Restore completed successfully\033[2J'
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    : > "$BACKUP_BASE/testhost/20261014_020000/$name.tar"
+    _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name"* ]]
+    _assert_no_raw_control
+}
+
+@test "a host dir with a real LF and ESC: refused, no forged line, no raw ESC (R2-01)" {
+    rm -rf "${BACKUP_BASE:?}"/*
+    mkdir -p "$BACKUP_BASE/"$'forge\033[2J\n[2026-10-14 03:00:00] FORGED'"/20261013_020000"
+    _drive_restore $'1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing host name"* ]]
+    _assert_no_raw_control
+}
+
+@test "a timestamp dir that isn't YYYYMMDD_HHMMSS is refused before it reaches a path or the log (R2-01)" {
+    rm -rf "${BACKUP_BASE:?}/testhost"/*
+    mkdir -p "$BACKUP_BASE/testhost/"$'20261014_020000\033]0;pwned\a\033[1A'
+    _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing backup dir"*"expected YYYYMMDD_HHMMSS"* ]]
+    [[ "$output" != *"Selected backup"* ]]
+    _assert_no_raw_control
+}
+
+@test "name check is ASCII-only in a UTF-8 locale (R2-02)" {
+    locale -a 2>/dev/null | grep -qi '^\(en_US\|C\)\.utf-\?8$' || skip "no UTF-8 locale installed"
+    local loc; loc=$(locale -a | grep -i '^en_US\.utf-\?8$' | head -1); loc=${loc:-C.UTF-8}
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    : > "$BACKUP_BASE/testhost/20261014_020000/café.tar"
+    LC_ALL="$loc" _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name"* ]]
+}
+
+@test "Step 4 makes archive owner/group names printable (round 3 F-03)" {
+    # GNU tar -tv escapes member names but prints owner names raw.
+    local src="$TEST_DIR/src7"
+    mkdir -p "$src/web"
+    echo x > "$src/web/tool" && chmod 4755 "$src/web/tool"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" -C "$src" \
+        --owner=$'ev\033]0;PWN\a\033[2Jil:0' --group=$'g\033[1A:0' web
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 member(s) are setuid/setgid"* ]]
+    ! grep -q $'\033\\]0;\\|\033\\[2J\\|\033\\[1A' <<< "$output"
+}
+
+@test "printable replaces UTF-8 C1 controls in a C locale, keeps — and é (round 3 F-04)" {
+    run env LC_ALL=C bash -c 'source "$1"; printable "a$(printf "\xc2\x9b")b — é"' _ "$BATS_TEST_DIRNAME/../lib.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" = "a?b — é" ]
+}
+
+@test "Step 3 only offers the archive suffixes the backup writes (round 3 F-05)" {
+    : > "$BACKUP_BASE/testhost/20261013_020000/odd.tar.weird"
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"odd"* ]]
+    [[ "$output" == *"Selected stack: "*"web"* ]]
+}
+
+@test "Step 4 lists numeric owners: a multi-line PAX owner name can't forge the preview (round 4 R4-01)" {
+    # Python tarfile: GNU tar's --owner can't take the ':' these fake lines need.
+    python3 -I - "$BACKUP_BASE/testhost/20261013_020000/web.tar" <<'PY'
+import io, sys, tarfile
+fake = "root" + "".join(f"\n-rw-r--r-- root/root 1 2026-10-13 02:00 ./config/fake{i:02d}.yml" for i in range(22))
+with tarfile.open(sys.argv[1], "w", format=tarfile.PAX_FORMAT) as t:
+    for name, data, uname in (("web/config/real.yml", b"real\n", fake), ("web/b", b"b\n", "root")):
+        ti = tarfile.TarInfo(name); ti.size = len(data); ti.uname = uname; ti.gname = "root"
+        t.addfile(ti, io.BytesIO(data))
+PY
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"fake00.yml"* ]]
+    [[ "$output" == *"web/config/real.yml"* ]]
+    [[ "$output" != *"more files"* ]]
 }

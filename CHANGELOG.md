@@ -1,5 +1,93 @@
 # Changelog
 
+## [0.5.3] — 2026-10-14
+
+The fixes from the v0.5.2 security audit (audit p3a, 1 Medium, 2 Low, 3 Info). Restore
+also stops following symlinks in an archive.
+
+### Security
+
+- **Cleanup no longer runs a share directory's name as code** (re-check round 3, F-01,
+  **High**; present since the first commit). `cleanup-old-backups.sh` sized each expired
+  run dir with `du -sb | cut -f1`. A dir whose name holds a newline made that return
+  `<bytes>` plus the rest of the name, which `$(( ))` then evaluated. An array subscript
+  like `BASH_VERSINFO[$(cmd)0]` ran `cmd` as the cleanup user: from cron, nightly, with
+  no operator involved. The size is now the text before the first whitespace and must be
+  all digits. Dirs whose names hold control bytes are skipped and logged with `%q`.
+- **The restore preview lists numeric owners** (`tar --numeric-owner -tvf`; round 4,
+  R4-01, Low). PAX owner/group names can hold line breaks, and one member's owner name
+  could replace the 20-line preview with forged lines.
+- **Cleanup checks the whole path below the base for control bytes**, not only the last
+  component (round 4, R4-02, Info).
+- **Cleanup's log is printable** (round 3, F-02, Low). Cleanup has its own `log*`
+  functions (it runs standalone). They now print messages as data, with control bytes
+  replaced, and no longer use `echo -e`.
+- **Step 4 makes owner and group names printable** (round 3, F-03, Low). `tar -tv` prints
+  them raw, so escape codes in them could reach root's terminal and blank the
+  setuid/special-member warning.
+- **`printable` also replaces UTF-8-encoded C1 controls** such as U+009B CSI, which
+  `[[:cntrl:]]` misses under the C locale (round 3, F-04, Info). Lone 0x80-0x9f bytes
+  are left alone: UTF-8 terminals ignore them, and stripping them would corrupt valid
+  characters.
+- **Step 3 only offers the suffixes the backup writes** (`.tar`, `.tar.gz`, `.tar.bz2`,
+  `.tar.xz`, `.tar.zst`) (round 3, F-05, Info).
+- **The dry run no longer evaluates a planted file as code** (audit F-01, Medium; predates
+  0.5.x). `docker-stack-backup.sh --dry-run` passed each stack's size through
+  `/tmp/stack_size_$$` and added what it read back inside `$(( ))`. Bash arithmetic runs
+  command substitutions in array subscripts. With `fs.protected_regular` (Debian's
+  default), another user's file planted at that name survives root's write. So
+  `BASH_VERSINFO[$(cmd)]` ran as whoever ran the dry run, root included under sudo. The
+  size now goes through a variable, and it must be digits before any arithmetic.
+- **Archive and host names can no longer forge log lines** (F-02, Low). `log_*` and the
+  wizard's list lines used `echo -e`, so a literal `\n` or `\033` in a name on the share
+  became a new line or an escape sequence in `/var/log/docker-restore.log` and on root's
+  terminal. Escapes are now interpreted only in the colour codes, and messages are
+  printed as data.
+- **Raw control bytes in share names are neutralised too** (re-check round 2, R2-01, Low).
+  `printf %s` stops escape interpretation but passes a real LF or ESC through as is. A new
+  `printable` lib helper replaces control bytes with `?` in every `log`/`log_*` message and
+  in the restore and verify list lines. Refused names are shown only via `printf %q`, so
+  the refusal itself can no longer write a forged line. Step 3's size column uses
+  `du_size`; `du -h f | cut -f1` reprinted the rest of a name holding a newline. The run
+  dir chosen at Step 2 must match `YYYYMMDD_HHMMSS`.
+- **The name checks are ASCII-only in every locale** (R2-02, Info). They are pinned to
+  `LC_ALL=C`; under `en_US.UTF-8` the ranges also matched `é`, `ß` and fullwidth letters.
+- **Step 4 flags members worth a second look** (F-03, Low): setuid/setgid files and
+  device, pipe or socket entries are counted and listed (up to 10) before "Proceed with
+  restore?". USAGE.md now says the backup share is a root trust boundary.
+- **Host and stack names from the share must be plain** (F-04, Info):
+  `[A-Za-z0-9._-]+`, not `.`, `..` or a leading `-`, the same rule the tar-create helper
+  applies. The globs already skipped dotfiles, but `shopt -s dotglob` in config.sh would
+  have lifted that.
+- **The space check refuses archives declaring 19+ digits of size** (F-05, Info). Such a
+  size wrapped bash's 64-bit arithmetic and passed the check.
+- **Symlinked appdata is flagged at Step 5, and the default safety copy is called
+  temporary** (F-06, Info). Under the default `TMPDIR`, the wizard says the copy will be
+  cleaned up and points to `RESTORE_SAFETY_DIR`.
+
+- **Restore no longer follows symlinks in an archive's config files or appdata dir.** It
+  runs as root. v0.5.1 checked `docker-compose.yml` with `[[ -f ]]` and copied it with a
+  plain `cp`, which follows links; v0.5.2 did the same for all four compose names and
+  `.env`. A member `compose.yaml -> /etc/shadow` was copied into the stack dir as root.
+  Symlinked members are now refused with a warning. Config files are copied with
+  `--remove-destination`, so a symlink already at the destination is replaced instead of
+  written through. A `<stack>` member that is a symlink no longer replaces the live
+  appdata. Found by the pre-audit security baseline (FW-21 class). Test:
+  `restore-step6.bats` "symlinks in the archive are not followed…" fails on v0.5.2.
+
+### Tests
+
+- One test per audit finding (F-01 to F-06, R2-01, R2-02). Round-1 tests fail on `9ea9118`;
+  the four round-2 tests (real LF/ESC in a stack name, a host dir and a timestamp dir; a
+  non-ASCII name under `en_US.UTF-8`) fail on `a62f2b4`. The five round-3 tests fail on
+  `5d88cdc`; on the cleanup test the injected command runs. The two round-4 tests fail on
+  `2202f48`. All pass here.
+- Known and accepted (round 4, R4-03): bytes that are not valid UTF-8 (lone 0x80-0x9f,
+  0xff) reach the cleanup log raw. Stripping them would corrupt valid UTF-8, so log
+  readers should treat the log as bytes. The
+  F-01 test `exec`s the dry run so its PID is known, plants a read-only
+  `/tmp/stack_size_<pid>`, and asserts that the injected command never runs.
+
 ## [0.5.2] — 2026-10-14
 
 The tools around the backup now work on a real share: restore, verify and the manual

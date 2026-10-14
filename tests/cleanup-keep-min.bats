@@ -134,3 +134,40 @@ _run_dir() {
     [ -d "$BACKUP_BASE/host one/run 37" ]
     [ ! -d "$BACKUP_BASE/host one/run 38" ]
 }
+
+# Audit p3a round 3, F-01: a run dir name holding a newline made `du -sb | cut -f1` return
+# "<bytes>\n<rest of name>", and $(( )) evaluated it — command execution as the cron user.
+@test "a share dir name with a newline and \$( ) runs nothing and is skipped (round 3 F-01)" {
+    # No '/' in the name (it would make nested dirs): the payload touches a relative
+    # path, so the script runs from $TEST_DIR and the marker would land there.
+    local mark="$TEST_DIR/PWNED" evil
+    evil="$BACKUP_BASE/host1/20200101_000000"$'\n'"+BASH_VERSINFO[\$(touch PWNED)0]"
+    mkdir -p "$evil" && echo x > "$evil/f"
+    touch -d "2020-01-01" "$evil"
+    _run_dir "$BACKUP_BASE/host1/run-1" 1
+    export KEEP_MIN=1
+    run bash -c 'cd "$1" && bash "$2"' _ "$TEST_DIR" "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ ! -e "$mark" ]
+    [ -d "$evil" ]
+    [[ "$output" == *"name contains control characters"* ]]
+}
+
+@test "cleanup's log gets one line per message, no raw control bytes (round 3 F-02)" {
+    local evil="$BACKUP_BASE/host1/old"$'\033[2J\n[2026-10-14 03:00:00] FORGED'
+    mkdir -p "$evil" && touch -d "2020-01-01" "$evil"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    ! grep -q $'\033' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
+}
+
+@test "a run dir under a parent whose name holds control bytes is skipped too (round 4 R4-02)" {
+    local parent="$BACKUP_BASE/evil"$'\n'"host"
+    _run_dir "$parent/run-40" 40
+    export KEEP_MIN=0
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$parent/run-40" ]
+    [[ "$output" == *"name contains control characters"* ]]
+}

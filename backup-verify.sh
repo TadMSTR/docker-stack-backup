@@ -68,7 +68,7 @@ list_backups() {
             continue
         fi
         
-        echo -e "${GREEN}Host: $hostname${NC}"
+        printf '%bHost: %s%b\n' "$GREEN" "$(printable "$hostname")" "$NC"
         
         for backup_dir in "$host_dir"/*; do
             if [[ ! -d "$backup_dir" ]]; then
@@ -79,14 +79,14 @@ list_backups() {
             local backup_count; backup_count=$(find "$backup_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || backup_count=0
             local total_size; total_size=$(du_size "$backup_dir" -h) || true
             
-            echo "  $timestamp - $backup_count stacks - $total_size"
+            echo "  $(printable "$timestamp") - $backup_count stacks - $total_size"
             
             for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
                 if [[ -f "$backup_file" ]]; then
                     local fname; fname=$(basename "$backup_file")
                     local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
                     local file_size; file_size=$(du_size "$backup_file" -h) || true
-                    echo "    - $stack_name ($file_size)"
+                    echo "    - $(printable "$stack_name") ($file_size)"
                 fi
             done
         done
@@ -114,7 +114,7 @@ verify_backups() {
             continue
         fi
         
-        echo -e "${GREEN}Verifying: $hostname${NC}"
+        printf '%bVerifying: %s%b\n' "$GREEN" "$(printable "$hostname")" "$NC"
         
         for backup_file in "$host_dir"/*/*.tar.* "$host_dir"/*/*.tar; do
             if [[ ! -f "$backup_file" ]]; then
@@ -126,10 +126,10 @@ verify_backups() {
             local relative_path="${backup_file#$BACKUP_BASE/}"
             
             if tar -tf "$backup_file" &>/dev/null; then
-                echo -e "  ${GREEN}✓${NC} $relative_path"
+                printf '  %b✓%b %s\n' "$GREEN" "$NC" "$(printable "$relative_path")"
                 total_valid=$((total_valid + 1))
             else
-                echo -e "  ${RED}✗${NC} $relative_path"
+                printf '  %b✗%b %s\n' "$RED" "$NC" "$(printable "$relative_path")"
                 total_invalid=$((total_invalid + 1))
             fi
         done
@@ -173,7 +173,7 @@ show_stats() {
                      END { print NR, old, new }'
         ) || true
         
-        echo -e "${GREEN}$hostname${NC}"
+        printf '%b%s%b\n' "$GREEN" "$(printable "$hostname")" "$NC"
         echo "  Backup sets: $backup_sets"
         echo "  Total backups: ${total_backups:-0}"
         echo "  Total size: $total_size"

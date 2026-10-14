@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.5.2"
+DSB_VERSION="0.5.3"
 
 #######################################
 # OS Detection
@@ -63,21 +63,40 @@ NC='\033[0m'
 # Logging functions
 # Requires: LOG_FILE to be set by caller
 #######################################
+# printable <text...> — the text with every control byte (LF, ESC, BEL, …) replaced by
+# '?'. For names read from the backup share on their way to a log line or the terminal:
+# printf %s stops escape *interpretation* but passes raw bytes, so a share name holding a
+# real LF or ESC could still forge a log line or drive root's terminal (audit p3a R2-01).
+# UTF-8-encoded C1 controls (C2 80-9F, e.g. U+009B CSI) are replaced too, byte-wise under
+# LC_ALL=C: in the C/POSIX locale [[:cntrl:]] does not see them (round 3, F-04). A lone
+# 0x80-0x9f byte is left alone; it is invalid UTF-8 that UTF-8 terminals ignore, and
+# stripping such bytes would corrupt valid characters like "—" (E2 80 94).
+printable() {
+    local s="$*"
+    s="${s//[[:cntrl:]]/?}"
+    local LC_ALL=C
+    printf '%s' "${s//$'\xc2'[$'\x80'-$'\x9f']/?}"
+}
+
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE:-/dev/stderr}"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $(printable "$@")" | tee -a "${LOG_FILE:-/dev/stderr}"
 }
 
 # Coloured line on the terminal, plain line in LOG_FILE: tee-ing the coloured line put
 # raw escape codes into every log reader's input. With no LOG_FILE, the coloured line
-# goes to stdout and stderr, as before.
+# goes to stdout and stderr, as before. Escapes are interpreted in the colour codes
+# only; the message is printed as data (%s), with control bytes made visible (printable). Messages carry names read from the backup
+# share, and `echo -e` turned a literal "\n" in an archive filename into a forged log
+# line (audit p3a F-02).
 _log_tagged() {
     local color="$1" tag="$2"; shift 2
+    local msg; msg=$(printable "$@")
     if [[ -z "${LOG_FILE:-}" ]]; then
-        echo -e "${color}${tag}${NC} $*" | tee -a /dev/stderr
+        printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$msg" | tee -a /dev/stderr
         return
     fi
-    echo -e "${color}${tag}${NC} $*"
-    echo -e "${tag} $*" >> "$LOG_FILE"
+    printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$msg"
+    printf '%s %s\n' "$tag" "$msg" >> "$LOG_FILE"
 }
 
 log_error() {

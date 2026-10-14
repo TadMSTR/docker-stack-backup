@@ -73,6 +73,35 @@ prompt_input() {
 }
 
 #######################################
+# Names read from the share go into root's rm -rf / cp / mkdir paths. Hold them to the
+# rule the tar-create helper applies to stack names. The dotfile-skipping globs already
+# keep . and .. out, but a `shopt -s dotglob` in config.sh would silently lift that
+# (audit p3a F-04).
+#######################################
+require_plain_name() {
+    local what="$1" name="$2"
+    # C locale: under en_US.UTF-8 the ranges also match é, ß, fullwidth letters (R2-02).
+    local LC_ALL=C
+    if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ || "$name" == -* || "$name" == . || "$name" == .. ]]; then
+        # %q, never the raw name: the refusal must not be the way a forged line gets in
+        # (R2-01).
+        log_error "Refusing $what name $(printf '%q' "$name"): only ASCII letters, digits, '.', '_' and '-' are allowed"
+        exit 1
+    fi
+}
+
+# Run dirs are named by the backup as YYYYMMDD_HHMMSS; anything else on the share is not
+# one of ours. Checked before the name reaches a path, a log line or the terminal (R2-01).
+require_timestamp_name() {
+    local name="$1"
+    local LC_ALL=C
+    if [[ ! "$name" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
+        log_error "Refusing backup dir $(printf '%q' "$name"): expected YYYYMMDD_HHMMSS"
+        exit 1
+    fi
+}
+
+#######################################
 # Select hostname
 #######################################
 select_hostname() {
@@ -83,7 +112,7 @@ select_hostname() {
     
     for host_dir in "$BACKUP_BASE"/*; do
         if [[ -d "$host_dir" ]]; then
-            hostnames+=("$(basename "$host_dir")")
+            hostnames+=("${host_dir##*/}")
         fi
     done
     
@@ -94,7 +123,7 @@ select_hostname() {
     
     echo "Available hosts:"
     for hostname in "${hostnames[@]}"; do
-        echo -e "  ${GREEN}$i)${NC} $hostname"
+        printf '  %b%s)%b %s\n' "$GREEN" "$i" "$NC" "$(printable "$hostname")"
         ((i++))
     done
     
@@ -107,7 +136,8 @@ select_hostname() {
     fi
     
     selected_hostname="${hostnames[$((selection-1))]}"
-    echo -e "\n${GREEN}✓${NC} Selected host: ${BOLD}$selected_hostname${NC}"
+    require_plain_name "host" "$selected_hostname"
+    printf '\n%b✓%b Selected host: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_hostname")" "$NC"
 }
 
 #######################################
@@ -148,7 +178,7 @@ select_timestamp() {
         # preview — fall back to 0 (DSBAK-9 / #24, same class as DSBAK-8).
         local stack_count; stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || stack_count=0
         
-        echo -e "  ${GREEN}$i)${NC} $formatted_date at $formatted_time (${stack_count} stacks)"
+        printf '  %b%s)%b %s at %s (%s stacks)\n' "$GREEN" "$i" "$NC" "$(printable "$formatted_date")" "$(printable "$formatted_time")" "$stack_count"
         ((i++))
     done
     
@@ -161,7 +191,8 @@ select_timestamp() {
     fi
     
     selected_timestamp="${timestamps[$((selection-1))]}"
-    echo -e "\n${GREEN}✓${NC} Selected backup: ${BOLD}$selected_timestamp${NC}"
+    require_timestamp_name "$selected_timestamp"
+    printf '\n%b✓%b Selected backup: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_timestamp")" "$NC"
 }
 
 #######################################
@@ -175,13 +206,18 @@ select_stack() {
     local -a stack_files=()
     local i=1
 
-    for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
-        if [[ -f "$backup_file" ]]; then
-            local fname; fname=$(basename "$backup_file")
-            local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
-            stacks+=("$stack_name")
-            stack_files+=("$backup_file")
-        fi
+    # Only the suffixes the backup writes (get_compression_extension), so the archive
+    # path is built from validated parts plus a known suffix (round 3, F-05).
+    local ext backup_file
+    for ext in .tar.gz .tar.bz2 .tar.xz .tar.zst .tar; do
+        for backup_file in "$backup_dir"/*"$ext"; do
+            if [[ -f "$backup_file" ]]; then
+                # ${##*/}, not $(basename): command substitution strips trailing newlines.
+                local fname="${backup_file##*/}"
+                stacks+=("${fname%"$ext"}")
+                stack_files+=("$backup_file")
+            fi
+        done
     done
 
     if [[ ${#stacks[@]} -eq 0 ]]; then
@@ -191,8 +227,10 @@ select_stack() {
 
     echo "Available stacks:"
     for stack in "${stacks[@]}"; do
-        local size; size=$(du -h "${stack_files[$((i-1))]}" | cut -f1)
-        echo -e "  ${GREEN}$i)${NC} $stack (${size})"
+        # du_size keeps only the number; `du -h f | cut -f1` reprinted the rest of a
+        # file name that holds a newline, a forged line on root's terminal (R2-01).
+        local size; size=$(du_size "${stack_files[$((i-1))]}" -h) || true
+        printf '  %b%s)%b %s (%s)\n' "$GREEN" "$i" "$NC" "$(printable "$stack")" "$size"
         ((i++))
     done
 
@@ -205,8 +243,9 @@ select_stack() {
     fi
 
     selected_stack="${stacks[$((selection-1))]}"
+    require_plain_name "stack" "$selected_stack"
     selected_backup_file="${stack_files[$((selection-1))]}"
-    echo -e "\n${GREEN}✓${NC} Selected stack: ${BOLD}$selected_stack${NC}"
+    printf '\n%b✓%b Selected stack: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_stack")" "$NC"
 }
 
 #######################################
@@ -222,15 +261,30 @@ preview_backup() {
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
+    # awk tags its output: P = a preview line (first 20), X = a member restoring it as
+    # root would be worth a second look (setuid/setgid, device, pipe, socket — audit p3a
+    # F-03), N = "<count> <bytes>" at EOF. Names come escaped from tar -tv, one per line.
     local out list_rc=0
-    out=$(tar -tvf "$selected_backup_file" | awk '
-        NR <= 20 { print }
+    # --numeric-owner: tar -tv prints owner/group names raw, and a PAX name can hold line
+    # breaks that replaced the preview with forged lines (round 4, R4-01). Numeric ids
+    # remove that channel; the awk field positions are unchanged.
+    out=$(tar --numeric-owner -tvf "$selected_backup_file" | awk '
+        NR <= 20 { print "P\t" $0 }
+        substr($1, 1, 1) ~ /[bcps]/ || substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/ { print "X\t" $0 }
         $3 ~ /^[0-9]+$/ { bytes += $3 }
-        END { printf "%d %.0f\n", NR, bytes }') || list_rc=$?
-    local summary="${out##*$'\n'}"
-    if [[ "$out" == *$'\n'* ]]; then
-        printf '%s\n' "${out%$'\n'*}"
-    fi
+        END { printf "N\t%d %.0f\n", NR, bytes }') || list_rc=$?
+    local line summary="0 0"
+    local -a special=()
+    while IFS= read -r line; do
+        case "${line%%$'\t'*}" in
+            # printable: tar -tv escapes member names and link targets but prints owner
+            # and group names raw, so an ESC there reached root's terminal and could blank
+            # the warning below (round 3, F-03).
+            P) printf '%s\n' "$(printable "${line#*$'\t'}")" ;;
+            X) special+=("${line#*$'\t'}") ;;
+            N) summary="${line#*$'\t'}" ;;
+        esac
+    done <<< "$out"
     local total_files="${summary% *}"
     if [[ $list_rc -ne 0 ]]; then
         log_warning "Could not list $selected_backup_file (tar exit $list_rc) — the archive may be corrupt or truncated"
@@ -241,6 +295,17 @@ preview_backup() {
 
     if [[ $total_files -gt 20 ]]; then
         echo -e "${YELLOW}... and $((total_files - 20)) more files${NC}"
+    fi
+    if [[ ${#special[@]} -gt 0 ]]; then
+        echo ""
+        log_warning "${#special[@]} member(s) are setuid/setgid or device/pipe/socket entries. Restored as root, they keep the owner and mode recorded in the archive:"
+        local entry
+        for entry in "${special[@]:0:10}"; do
+            printf '  %s\n' "$(printable "$entry")"
+        done
+        if [[ ${#special[@]} -gt 10 ]]; then
+            echo "  ... and $(( ${#special[@]} - 10 )) more"
+        fi
     fi
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}\n"
     
@@ -276,6 +341,12 @@ check_conflicts() {
         fi
     fi
     
+    # A symlinked appdata dir: the restore replaces the link with a real dir on
+    # APPDATA_PATH's filesystem, and the link's target is left as it was (audit p3a F-06).
+    if [[ -L "$appdata_dir" ]]; then
+        log_warning "Appdata $appdata_dir is a symlink (-> $(readlink -- "$appdata_dir")): the restore replaces the link with a real directory and leaves the target untouched"
+    fi
+
     # Check if appdata exists
     if [[ -d "$appdata_dir" ]]; then
         local appdata_size; appdata_size=$(du_size "$appdata_dir" -h) || true
@@ -346,6 +417,12 @@ check_restore_space() {
     if [[ ! "$need_extract" =~ ^[0-9]+$ ]]; then
         need_extract=$(stat -c %s -- "$selected_backup_file" 2>/dev/null) || need_extract=0
     fi
+    # Member sizes are as the archive declares them. 19+ digits would wrap bash's 64-bit
+    # arithmetic and make the comparison below pass (audit p3a F-05).
+    if [[ ${#need_extract} -gt 18 ]]; then
+        log_error "The archive declares an implausible total size ($need_extract bytes) — nothing was changed"
+        return 1
+    fi
     local need_safety=0
     if [[ "$restore_mode" == "backup_first" ]]; then
         local sz
@@ -407,8 +484,12 @@ replace_stack_files() {
     # leftover higher-priority file would shadow the restored one.
     local -a compose_names=(compose.yaml compose.yml docker-compose.yaml docker-compose.yml)
     local name other restored_compose=false
+    # Only regular files, never symlinks: this runs as root on an archive read from a
+    # share, and `-f`/`cp` follow links, so a member `compose.yaml -> /etc/shadow` would
+    # copy that file's content into the stack dir. --remove-destination likewise keeps cp
+    # from writing through a symlink already sitting at the destination.
     for name in "${compose_names[@]}"; do
-        if [[ -f "$temp_restore/$name" ]]; then
+        if [[ -f "$temp_restore/$name" && ! -L "$temp_restore/$name" ]]; then
             for other in "${compose_names[@]}"; do
                 [[ "$other" == "$name" ]] || rm -f -- "${stack_dir:?}/$other" || return 1
             done
@@ -416,8 +497,10 @@ replace_stack_files() {
         fi
     done
     for name in "${compose_names[@]}" .env; do
-        if [[ -f "$temp_restore/$name" ]]; then
-            cp -p "$temp_restore/$name" "$stack_dir/" || return 1
+        if [[ -L "$temp_restore/$name" ]]; then
+            log_warning "Not restoring $name: it is a symlink in the archive"
+        elif [[ -f "$temp_restore/$name" ]]; then
+            cp -p --remove-destination "$temp_restore/$name" "$stack_dir/$name" || return 1
             [[ "$name" != .env ]] && restored_compose=true
         fi
     done
@@ -426,9 +509,10 @@ replace_stack_files() {
     fi
 
     log "Restoring appdata..."
-    if [[ ! -d "$temp_restore/$selected_stack" ]]; then
-        # Never delete the live appdata when there is nothing to put in its place.
-        log_warning "The backup holds no $selected_stack/ appdata; existing appdata left as is"
+    if [[ -L "$temp_restore/$selected_stack" || ! -d "$temp_restore/$selected_stack" ]]; then
+        # Never delete the live appdata when there is nothing (or only a symlink) to put
+        # in its place.
+        log_warning "The backup holds no $selected_stack/ appdata directory; existing appdata left as is"
         return 0
     fi
     if [[ -d "$appdata_dir" ]]; then
@@ -489,6 +573,9 @@ perform_restore() {
             return 1
         fi
         log_success "Safety backup created"
+        if [[ -z "${RESTORE_SAFETY_DIR:-}" ]]; then
+            log_warning "That copy is under TMPDIR (${TMPDIR:-/tmp}), which is cleaned up (Debian: after 10 days, or at reboot on tmpfs). Move it if you need to keep it; set RESTORE_SAFETY_DIR for a lasting location."
+        fi
     fi
 
     if ! replace_stack_files "$temp_restore" "$stack_dir" "$appdata_dir"; then
