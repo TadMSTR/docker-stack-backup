@@ -87,5 +87,5 @@ STUB
 @test "the run header logs the version" {
     run_backup
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Version: docker-stack-backup 0.5.0"* ]]
+    [[ "$output" == *"Version: docker-stack-backup 0.5.1"* ]]
 }
