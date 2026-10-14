@@ -80,8 +80,23 @@ prompt_input() {
 #######################################
 require_plain_name() {
     local what="$1" name="$2"
+    # C locale: under en_US.UTF-8 the ranges also match é, ß, fullwidth letters (R2-02).
+    local LC_ALL=C
     if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ || "$name" == -* || "$name" == . || "$name" == .. ]]; then
-        log_error "Refusing $what name '$name': only letters, digits, '.', '_' and '-' are allowed"
+        # %q, never the raw name: the refusal must not be the way a forged line gets in
+        # (R2-01).
+        log_error "Refusing $what name $(printf '%q' "$name"): only ASCII letters, digits, '.', '_' and '-' are allowed"
+        exit 1
+    fi
+}
+
+# Run dirs are named by the backup as YYYYMMDD_HHMMSS; anything else on the share is not
+# one of ours. Checked before the name reaches a path, a log line or the terminal (R2-01).
+require_timestamp_name() {
+    local name="$1"
+    local LC_ALL=C
+    if [[ ! "$name" =~ ^[0-9]{8}_[0-9]{6}$ ]]; then
+        log_error "Refusing backup dir $(printf '%q' "$name"): expected YYYYMMDD_HHMMSS"
         exit 1
     fi
 }
@@ -108,7 +123,7 @@ select_hostname() {
     
     echo "Available hosts:"
     for hostname in "${hostnames[@]}"; do
-        printf '  %b%s)%b %s\n' "$GREEN" "$i" "$NC" "$hostname"
+        printf '  %b%s)%b %s\n' "$GREEN" "$i" "$NC" "$(printable "$hostname")"
         ((i++))
     done
     
@@ -122,7 +137,7 @@ select_hostname() {
     
     selected_hostname="${hostnames[$((selection-1))]}"
     require_plain_name "host" "$selected_hostname"
-    printf '\n%b✓%b Selected host: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$selected_hostname" "$NC"
+    printf '\n%b✓%b Selected host: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_hostname")" "$NC"
 }
 
 #######################################
@@ -163,7 +178,7 @@ select_timestamp() {
         # preview — fall back to 0 (DSBAK-9 / #24, same class as DSBAK-8).
         local stack_count; stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || stack_count=0
         
-        printf '  %b%s)%b %s at %s (%s stacks)\n' "$GREEN" "$i" "$NC" "$formatted_date" "$formatted_time" "$stack_count"
+        printf '  %b%s)%b %s at %s (%s stacks)\n' "$GREEN" "$i" "$NC" "$(printable "$formatted_date")" "$(printable "$formatted_time")" "$stack_count"
         ((i++))
     done
     
@@ -176,7 +191,8 @@ select_timestamp() {
     fi
     
     selected_timestamp="${timestamps[$((selection-1))]}"
-    printf '\n%b✓%b Selected backup: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$selected_timestamp" "$NC"
+    require_timestamp_name "$selected_timestamp"
+    printf '\n%b✓%b Selected backup: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_timestamp")" "$NC"
 }
 
 #######################################
@@ -206,8 +222,10 @@ select_stack() {
 
     echo "Available stacks:"
     for stack in "${stacks[@]}"; do
-        local size; size=$(du -h "${stack_files[$((i-1))]}" | cut -f1)
-        printf '  %b%s)%b %s (%s)\n' "$GREEN" "$i" "$NC" "$stack" "$size"
+        # du_size keeps only the number; `du -h f | cut -f1` reprinted the rest of a
+        # file name that holds a newline, a forged line on root's terminal (R2-01).
+        local size; size=$(du_size "${stack_files[$((i-1))]}" -h) || true
+        printf '  %b%s)%b %s (%s)\n' "$GREEN" "$i" "$NC" "$(printable "$stack")" "$size"
         ((i++))
     done
 
@@ -222,7 +240,7 @@ select_stack() {
     selected_stack="${stacks[$((selection-1))]}"
     require_plain_name "stack" "$selected_stack"
     selected_backup_file="${stack_files[$((selection-1))]}"
-    printf '\n%b✓%b Selected stack: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$selected_stack" "$NC"
+    printf '\n%b✓%b Selected stack: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_stack")" "$NC"
 }
 
 #######################################

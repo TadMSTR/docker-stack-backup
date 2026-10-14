@@ -63,24 +63,34 @@ NC='\033[0m'
 # Logging functions
 # Requires: LOG_FILE to be set by caller
 #######################################
+# printable <text...> — the text with every control byte (LF, ESC, BEL, …) replaced by
+# '?'. For names read from the backup share on their way to a log line or the terminal:
+# printf %s stops escape *interpretation* but passes raw bytes, so a share name holding a
+# real LF or ESC could still forge a log line or drive root's terminal (audit p3a R2-01).
+printable() {
+    local s="$*"
+    printf '%s' "${s//[[:cntrl:]]/?}"
+}
+
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE:-/dev/stderr}"
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $(printable "$@")" | tee -a "${LOG_FILE:-/dev/stderr}"
 }
 
 # Coloured line on the terminal, plain line in LOG_FILE: tee-ing the coloured line put
 # raw escape codes into every log reader's input. With no LOG_FILE, the coloured line
 # goes to stdout and stderr, as before. Escapes are interpreted in the colour codes
-# only; the message is printed as data (%s). Messages carry names read from the backup
+# only; the message is printed as data (%s), with control bytes made visible (printable). Messages carry names read from the backup
 # share, and `echo -e` turned a literal "\n" in an archive filename into a forged log
 # line (audit p3a F-02).
 _log_tagged() {
     local color="$1" tag="$2"; shift 2
+    local msg; msg=$(printable "$@")
     if [[ -z "${LOG_FILE:-}" ]]; then
-        printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$*" | tee -a /dev/stderr
+        printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$msg" | tee -a /dev/stderr
         return
     fi
-    printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$*"
-    printf '%s %s\n' "$tag" "$*" >> "$LOG_FILE"
+    printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$msg"
+    printf '%s %s\n' "$tag" "$msg" >> "$LOG_FILE"
 }
 
 log_error() {

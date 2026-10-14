@@ -273,7 +273,7 @@ STUB
     _drive_restore $'1\n1\n1\ny\nn'
     [ "$status" -eq 1 ]
     [[ "$output" == *"Refusing stack name"* ]]
-    grep -qF "[ERROR] Refusing stack name '$name'" "$LOG_FILE"
+    grep -qF "[ERROR] Refusing stack name $(printf '%q' "$name")" "$LOG_FILE"
     ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
     ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
 }
@@ -291,7 +291,7 @@ STUB
     : > "$BACKUP_BASE/testhost/20261014_020000/we b.tar"
     _drive_restore $'1\n1\n1'
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Refusing stack name 'we b'"* ]]
+    [[ "$output" == *'Refusing stack name we\ b'* ]]
     ! grep -q 'compose down' "$DOCKER_LOG"
 }
 
@@ -330,4 +330,54 @@ STUB
     [ "$(cat "$TEST_DIR/real-web/data.txt")" = old-data ]
     [ ! -L "$APPDATA_PATH/web" ]
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = new-data ]
+}
+
+# Raw control bytes (a real LF or ESC, not a backslash sequence) in names on the share:
+# printf %s passed them through, so the refusal message and the list lines could still
+# forge a root log line or drive the terminal (audit p3a round 2, R2-01).
+_assert_no_raw_control() {
+    ! grep -q $'\033' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
+    # The only ESC bytes on the terminal are our own colour codes.
+    ! grep -q $'\033\\[2J\\|\033\\]0;' <<< "$output"
+}
+
+@test "a stack archive name with a real LF and ESC: refused, no forged line, no raw ESC (R2-01)" {
+    local name=$'web\n[2026-10-14 03:00:00] FORGED Restore completed successfully\033[2J'
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    : > "$BACKUP_BASE/testhost/20261014_020000/$name.tar"
+    _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name"* ]]
+    _assert_no_raw_control
+}
+
+@test "a host dir with a real LF and ESC: refused, no forged line, no raw ESC (R2-01)" {
+    rm -rf "${BACKUP_BASE:?}"/*
+    mkdir -p "$BACKUP_BASE/"$'forge\033[2J\n[2026-10-14 03:00:00] FORGED'"/20261013_020000"
+    _drive_restore $'1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing host name"* ]]
+    _assert_no_raw_control
+}
+
+@test "a timestamp dir that isn't YYYYMMDD_HHMMSS is refused before it reaches a path or the log (R2-01)" {
+    rm -rf "${BACKUP_BASE:?}/testhost"/*
+    mkdir -p "$BACKUP_BASE/testhost/"$'20261014_020000\033]0;pwned\a\033[1A'
+    _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing backup dir"*"expected YYYYMMDD_HHMMSS"* ]]
+    [[ "$output" != *"Selected backup"* ]]
+    _assert_no_raw_control
+}
+
+@test "name check is ASCII-only in a UTF-8 locale (R2-02)" {
+    locale -a 2>/dev/null | grep -qi '^\(en_US\|C\)\.utf-\?8$' || skip "no UTF-8 locale installed"
+    local loc; loc=$(locale -a | grep -i '^en_US\.utf-\?8$' | head -1); loc=${loc:-C.UTF-8}
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    : > "$BACKUP_BASE/testhost/20261014_020000/café.tar"
+    LC_ALL="$loc" _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name"* ]]
 }

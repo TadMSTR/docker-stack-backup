@@ -19,6 +19,15 @@ also stops following symlinks in an archive.
   became a new line or an escape sequence in `/var/log/docker-restore.log` and on root's
   terminal. Escapes are now interpreted only in the colour codes, and messages are
   printed as data.
+- **Raw control bytes in share names are neutralised too** (re-check round 2, R2-01, Low).
+  `printf %s` stops escape interpretation but passes a real LF or ESC through as is. A new
+  `printable` lib helper replaces control bytes with `?` in every `log`/`log_*` message and
+  in the restore and verify list lines. Refused names are shown only via `printf %q`, so
+  the refusal itself can no longer write a forged line. Step 3's size column uses
+  `du_size`; `du -h f | cut -f1` reprinted the rest of a name holding a newline. The run
+  dir chosen at Step 2 must match `YYYYMMDD_HHMMSS`.
+- **The name checks are ASCII-only in every locale** (R2-02, Info). They are pinned to
+  `LC_ALL=C`; under `en_US.UTF-8` the ranges also matched `é`, `ß` and fullwidth letters.
 - **Step 4 flags members worth a second look** (F-03, Low): setuid/setgid files and
   device, pipe or socket entries are counted and listed (up to 10) before "Proceed with
   restore?". USAGE.md now says the backup share is a root trust boundary.
@@ -44,7 +53,9 @@ also stops following symlinks in an archive.
 
 ### Tests
 
-- One test per audit finding (F-01 to F-06). All 7 fail on `9ea9118` and pass here. The
+- One test per audit finding (F-01 to F-06, R2-01, R2-02). Round-1 tests fail on `9ea9118`;
+  the four round-2 tests (real LF/ESC in a stack name, a host dir and a timestamp dir; a
+  non-ASCII name under `en_US.UTF-8`) fail on `a62f2b4`. All pass here. The
   F-01 test `exec`s the dry run so its PID is known, plants a read-only
   `/tmp/stack_size_<pid>`, and asserts that the injected command never runs.
 
