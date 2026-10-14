@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Security
+
+- **Restore no longer follows symlinks in an archive's config files or appdata dir.** It
+  runs as root. v0.5.1 checked `docker-compose.yml` with `[[ -f ]]` and copied it with a
+  plain `cp`, which follows links; v0.5.2 did the same for all four compose names and
+  `.env`. A member `compose.yaml -> /etc/shadow` was copied into the stack dir as root.
+  Symlinked members are now refused with a warning. Config files are copied with
+  `--remove-destination`, so a symlink already at the destination is replaced instead of
+  written through. A `<stack>` member that is a symlink no longer replaces the live
+  appdata. Found by the pre-audit security baseline (FW-21 class). Test:
+  `restore-step6.bats` "symlinks in the archive are not followed…" fails on v0.5.2.
+
 ## [0.5.2] — 2026-10-14
 
 The tools around the backup now work on a real share: restore, verify and the manual

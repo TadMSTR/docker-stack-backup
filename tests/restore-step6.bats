@@ -182,7 +182,7 @@ STUB
     tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" -C "$src" .
     _drive_restore $'1\n1\n1\ny\n1\ny\ny'
     [ "$status" -eq 0 ]
-    [[ "$output" == *"no web/ appdata"* ]]
+    [[ "$output" == *"no web/ appdata directory"* ]]
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
     [ "$(cat "$STACK_DIR/compose.yaml")" = new-compose ]
 }
@@ -232,4 +232,32 @@ STUB
     [ ! -e "$STACK_DIR/compose.yaml" ]
     # The old file survives in the safety copy.
     [ "$(cat "$RESTORE_SAFETY_DIR"/docker-restore-backup-web-*/stack/compose.yaml)" = old-compose ]
+}
+
+@test "symlinks in the archive are not followed, and not written through at the destination" {
+    # Archive: compose.yaml -> a file outside (as root this could be /etc/shadow), and
+    # web -> a dir outside. Live stack dir: .env is a symlink to another outside file.
+    echo top-secret > "$TEST_DIR/secret"
+    mkdir -p "$TEST_DIR/outside-dir" && echo outside > "$TEST_DIR/outside-dir/x"
+    echo victim > "$TEST_DIR/victim"
+    ln -s "$TEST_DIR/victim" "$STACK_DIR/.env"
+    local src="$TEST_DIR/src4"
+    mkdir -p "$src"
+    ln -s "$TEST_DIR/secret" "$src/compose.yaml"
+    echo NEW_ENV=1 > "$src/.env"
+    ln -s "$TEST_DIR/outside-dir" "$src/web"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" --owner=0 --group=0 --numeric-owner -C "$src" .
+    _drive_restore $'1\n1\n1\ny\n2\ny'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Not restoring compose.yaml: it is a symlink in the archive"* ]]
+    # The secret was not copied in, and the old compose file was left alone.
+    [ "$(cat "$STACK_DIR/compose.yaml")" = old-compose ]
+    ! grep -rq top-secret "$STACK_DIR" "$APPDATA_PATH"
+    # .env replaced the destination symlink instead of writing through it.
+    [ ! -L "$STACK_DIR/.env" ]
+    [ "$(cat "$STACK_DIR/.env")" = NEW_ENV=1 ]
+    [ "$(cat "$TEST_DIR/victim")" = victim ]
+    # The appdata symlink member did not replace the live appdata.
+    [ ! -L "$APPDATA_PATH/web" ]
+    [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
 }

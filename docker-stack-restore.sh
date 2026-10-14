@@ -407,8 +407,12 @@ replace_stack_files() {
     # leftover higher-priority file would shadow the restored one.
     local -a compose_names=(compose.yaml compose.yml docker-compose.yaml docker-compose.yml)
     local name other restored_compose=false
+    # Only regular files, never symlinks: this runs as root on an archive read from a
+    # share, and `-f`/`cp` follow links, so a member `compose.yaml -> /etc/shadow` would
+    # copy that file's content into the stack dir. --remove-destination likewise keeps cp
+    # from writing through a symlink already sitting at the destination.
     for name in "${compose_names[@]}"; do
-        if [[ -f "$temp_restore/$name" ]]; then
+        if [[ -f "$temp_restore/$name" && ! -L "$temp_restore/$name" ]]; then
             for other in "${compose_names[@]}"; do
                 [[ "$other" == "$name" ]] || rm -f -- "${stack_dir:?}/$other" || return 1
             done
@@ -416,8 +420,10 @@ replace_stack_files() {
         fi
     done
     for name in "${compose_names[@]}" .env; do
-        if [[ -f "$temp_restore/$name" ]]; then
-            cp -p "$temp_restore/$name" "$stack_dir/" || return 1
+        if [[ -L "$temp_restore/$name" ]]; then
+            log_warning "Not restoring $name: it is a symlink in the archive"
+        elif [[ -f "$temp_restore/$name" ]]; then
+            cp -p --remove-destination "$temp_restore/$name" "$stack_dir/$name" || return 1
             [[ "$name" != .env ]] && restored_compose=true
         fi
     done
@@ -426,9 +432,10 @@ replace_stack_files() {
     fi
 
     log "Restoring appdata..."
-    if [[ ! -d "$temp_restore/$selected_stack" ]]; then
-        # Never delete the live appdata when there is nothing to put in its place.
-        log_warning "The backup holds no $selected_stack/ appdata; existing appdata left as is"
+    if [[ -L "$temp_restore/$selected_stack" || ! -d "$temp_restore/$selected_stack" ]]; then
+        # Never delete the live appdata when there is nothing (or only a symlink) to put
+        # in its place.
+        log_warning "The backup holds no $selected_stack/ appdata directory; existing appdata left as is"
         return 0
     fi
     if [[ -d "$appdata_dir" ]]; then
