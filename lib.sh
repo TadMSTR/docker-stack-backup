@@ -67,9 +67,15 @@ NC='\033[0m'
 # '?'. For names read from the backup share on their way to a log line or the terminal:
 # printf %s stops escape *interpretation* but passes raw bytes, so a share name holding a
 # real LF or ESC could still forge a log line or drive root's terminal (audit p3a R2-01).
+# UTF-8-encoded C1 controls (C2 80-9F, e.g. U+009B CSI) are replaced too, byte-wise under
+# LC_ALL=C: in the C/POSIX locale [[:cntrl:]] does not see them (round 3, F-04). A lone
+# 0x80-0x9f byte is left alone; it is invalid UTF-8 that UTF-8 terminals ignore, and
+# stripping such bytes would corrupt valid characters like "—" (E2 80 94).
 printable() {
     local s="$*"
-    printf '%s' "${s//[[:cntrl:]]/?}"
+    s="${s//[[:cntrl:]]/?}"
+    local LC_ALL=C
+    printf '%s' "${s//$'\xc2'[$'\x80'-$'\x9f']/?}"
 }
 
 log() {

@@ -7,6 +7,25 @@ also stops following symlinks in an archive.
 
 ### Security
 
+- **Cleanup no longer runs a share directory's name as code** (re-check round 3, F-01,
+  **High**; present since the first commit). `cleanup-old-backups.sh` sized each expired
+  run dir with `du -sb | cut -f1`. A dir whose name holds a newline made that return
+  `<bytes>` plus the rest of the name, which `$(( ))` then evaluated. An array subscript
+  like `BASH_VERSINFO[$(cmd)0]` ran `cmd` as the cleanup user: from cron, nightly, with
+  no operator involved. The size is now the text before the first whitespace and must be
+  all digits. Dirs whose names hold control bytes are skipped and logged with `%q`.
+- **Cleanup's log is printable** (round 3, F-02, Low). Cleanup has its own `log*`
+  functions (it runs standalone). They now print messages as data, with control bytes
+  replaced, and no longer use `echo -e`.
+- **Step 4 makes owner and group names printable** (round 3, F-03, Low). `tar -tv` prints
+  them raw, so escape codes in them could reach root's terminal and blank the
+  setuid/special-member warning.
+- **`printable` also replaces UTF-8-encoded C1 controls** such as U+009B CSI, which
+  `[[:cntrl:]]` misses under the C locale (round 3, F-04, Info). Lone 0x80-0x9f bytes
+  are left alone: UTF-8 terminals ignore them, and stripping them would corrupt valid
+  characters.
+- **Step 3 only offers the suffixes the backup writes** (`.tar`, `.tar.gz`, `.tar.bz2`,
+  `.tar.xz`, `.tar.zst`) (round 3, F-05, Info).
 - **The dry run no longer evaluates a planted file as code** (audit F-01, Medium; predates
   0.5.x). `docker-stack-backup.sh --dry-run` passed each stack's size through
   `/tmp/stack_size_$$` and added what it read back inside `$(( ))`. Bash arithmetic runs
@@ -55,7 +74,8 @@ also stops following symlinks in an archive.
 
 - One test per audit finding (F-01 to F-06, R2-01, R2-02). Round-1 tests fail on `9ea9118`;
   the four round-2 tests (real LF/ESC in a stack name, a host dir and a timestamp dir; a
-  non-ASCII name under `en_US.UTF-8`) fail on `a62f2b4`. All pass here. The
+  non-ASCII name under `en_US.UTF-8`) fail on `a62f2b4`. The five round-3 tests fail on
+  `5d88cdc`; on the cleanup test the injected command runs. All pass here. The
   F-01 test `exec`s the dry run so its PID is known, plants a read-only
   `/tmp/stack_size_<pid>`, and asserts that the injected command never runs.
 

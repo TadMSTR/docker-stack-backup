@@ -381,3 +381,30 @@ _assert_no_raw_control() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"Refusing stack name"* ]]
 }
+
+@test "Step 4 makes archive owner/group names printable (round 3 F-03)" {
+    # GNU tar -tv escapes member names but prints owner names raw.
+    local src="$TEST_DIR/src7"
+    mkdir -p "$src/web"
+    echo x > "$src/web/tool" && chmod 4755 "$src/web/tool"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" -C "$src" \
+        --owner=$'ev\033]0;PWN\a\033[2Jil:0' --group=$'g\033[1A:0' web
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"1 member(s) are setuid/setgid"* ]]
+    ! grep -q $'\033\\]0;\\|\033\\[2J\\|\033\\[1A' <<< "$output"
+}
+
+@test "printable replaces UTF-8 C1 controls in a C locale, keeps — and é (round 3 F-04)" {
+    run env LC_ALL=C bash -c 'source "$1"; printable "a$(printf "\xc2\x9b")b — é"' _ "$BATS_TEST_DIRNAME/../lib.sh"
+    [ "$status" -eq 0 ]
+    [ "$output" = "a?b — é" ]
+}
+
+@test "Step 3 only offers the archive suffixes the backup writes (round 3 F-05)" {
+    : > "$BACKUP_BASE/testhost/20261013_020000/odd.tar.weird"
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"odd"* ]]
+    [[ "$output" == *"Selected stack: "*"web"* ]]
+}

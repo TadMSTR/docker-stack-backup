@@ -112,7 +112,7 @@ select_hostname() {
     
     for host_dir in "$BACKUP_BASE"/*; do
         if [[ -d "$host_dir" ]]; then
-            hostnames+=("$(basename "$host_dir")")
+            hostnames+=("${host_dir##*/}")
         fi
     done
     
@@ -206,13 +206,18 @@ select_stack() {
     local -a stack_files=()
     local i=1
 
-    for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
-        if [[ -f "$backup_file" ]]; then
-            local fname; fname=$(basename "$backup_file")
-            local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
-            stacks+=("$stack_name")
-            stack_files+=("$backup_file")
-        fi
+    # Only the suffixes the backup writes (get_compression_extension), so the archive
+    # path is built from validated parts plus a known suffix (round 3, F-05).
+    local ext backup_file
+    for ext in .tar.gz .tar.bz2 .tar.xz .tar.zst .tar; do
+        for backup_file in "$backup_dir"/*"$ext"; do
+            if [[ -f "$backup_file" ]]; then
+                # ${##*/}, not $(basename): command substitution strips trailing newlines.
+                local fname="${backup_file##*/}"
+                stacks+=("${fname%"$ext"}")
+                stack_files+=("$backup_file")
+            fi
+        done
     done
 
     if [[ ${#stacks[@]} -eq 0 ]]; then
@@ -269,7 +274,10 @@ preview_backup() {
     local -a special=()
     while IFS= read -r line; do
         case "${line%%$'\t'*}" in
-            P) printf '%s\n' "${line#*$'\t'}" ;;
+            # printable: tar -tv escapes member names and link targets but prints owner
+            # and group names raw, so an ESC there reached root's terminal and could blank
+            # the warning below (round 3, F-03).
+            P) printf '%s\n' "$(printable "${line#*$'\t'}")" ;;
             X) special+=("${line#*$'\t'}") ;;
             N) summary="${line#*$'\t'}" ;;
         esac
@@ -288,7 +296,10 @@ preview_backup() {
     if [[ ${#special[@]} -gt 0 ]]; then
         echo ""
         log_warning "${#special[@]} member(s) are setuid/setgid or device/pipe/socket entries. Restored as root, they keep the owner and mode recorded in the archive:"
-        printf '  %s\n' "${special[@]:0:10}"
+        local entry
+        for entry in "${special[@]:0:10}"; do
+            printf '  %s\n' "$(printable "$entry")"
+        done
         if [[ ${#special[@]} -gt 10 ]]; then
             echo "  ... and $(( ${#special[@]} - 10 )) more"
         fi

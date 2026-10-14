@@ -58,20 +58,31 @@ else
     RED='' GREEN='' YELLOW='' NC=''
 fi
 
+# This script runs standalone (it does not source lib.sh), so it carries its own copy of
+# printable(): control bytes become '?', so a directory name on the share cannot forge
+# a log line or put raw escapes in the log (audit p3a round 3, F-02). Messages are
+# printed as data (%s); escapes are interpreted in the colour codes only.
+printable() {
+    local s="$*"
+    s="${s//[[:cntrl:]]/?}"
+    local LC_ALL=C
+    printf '%s' "${s//$'\xc2'[$'\x80'-$'\x9f']/?}"
+}
+
 log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+    printf '[%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$(printable "$@")" | tee -a "$LOG_FILE"
 }
 
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $*" | tee -a "$LOG_FILE"
+    printf '%b[ERROR]%b %s\n' "$RED" "$NC" "$(printable "$@")" | tee -a "$LOG_FILE"
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "$LOG_FILE"
+    printf '%b[SUCCESS]%b %s\n' "$GREEN" "$NC" "$(printable "$@")" | tee -a "$LOG_FILE"
 }
 
 log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "$LOG_FILE"
+    printf '%b[WARNING]%b %s\n' "$YELLOW" "$NC" "$(printable "$@")" | tee -a "$LOG_FILE"
 }
 
 # validate_uint <VAR_NAME> <min> <max>: VAR must be a plain decimal integer within
@@ -91,6 +102,12 @@ validate_uint() {
         return 1
     fi
     printf -v "$name" '%s' "$val"
+}
+
+# True if $1 holds no control byte (C0, DEL, or UTF-8-encoded C1). Spaces and other
+# printable characters are fine: run dirs named "run 31" are a supported layout.
+has_no_control_bytes() {
+    [[ "$(printable "$1")" == "$1" ]]
 }
 
 # True if $1 directly holds at least one completed archive
@@ -153,8 +170,22 @@ main() {
             continue
         fi
 
+        # A name on the share is attacker-chosen: one holding a newline made
+        # `du -sb | cut -f1` return "<bytes>\n<rest of name>", and $(( )) below then
+        # evaluated that, running `$( )` in an array subscript as the cron user (audit p3a
+        # round 3, F-01). The digit check below is the fix; skipping names with control
+        # bytes keeps cleanup from deleting what no backup wrote. ${##*/}, not
+        # $(basename): command substitution would strip a trailing newline.
+        if ! has_no_control_bytes "${backup_dir##*/}"; then
+            log_warning "Skipping $(printf '%q' "$backup_dir"): name contains control characters"
+            continue
+        fi
+
         local size
-        size=$(du -sb "$backup_dir" | cut -f1)
+        size=$(du -sb -- "$backup_dir" 2>/dev/null) || true
+        size="${size%%[[:space:]]*}"
+        # Digits only before arithmetic: $(( )) evaluates its operand's content.
+        [[ "$size" =~ ^[0-9]+$ ]] || size=0
         log "Removing old backup: $backup_dir ($(numfmt --to=iec-i --suffix=B "$size"))"
 
         if rm -rf "$backup_dir"; then
