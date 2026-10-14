@@ -35,8 +35,9 @@ detect_os() {
 detect_os
 
 # Configuration — all vars can be overridden via env; BACKUP_BASE also accepts $1
-# CLI arg takes precedence over env var, env var takes precedence over default.
-BACKUP_BASE="${1:-${BACKUP_BASE:-/mnt/backup/docker-backups}}"
+# CLI arg takes precedence over BACKUP_BASE, then BACKUP_DEST (the key the backup writes
+# to, #1091), then the default.
+BACKUP_BASE="${1:-${BACKUP_BASE:-${BACKUP_DEST:-/mnt/backup/docker-backups}}}"
 RETENTION_DAYS="${RETENTION_DAYS:-30}"
 # Depth of dated backup dirs inside BACKUP_BASE.
 # 1 = BACKUP_BASE/YYYY-MM-DD/, 2 = BACKUP_BASE/stack/YYYY-MM-DD/

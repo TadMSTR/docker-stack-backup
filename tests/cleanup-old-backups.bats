@@ -36,6 +36,15 @@ _make_dir() {
     [[ "$output" == *"Backup directory not found"* ]]
 }
 
+@test "falls back to BACKUP_DEST when neither \$1 nor BACKUP_BASE is set (#1091)" {
+    unset BACKUP_BASE
+    export BACKUP_DEST="$TEST_DIR/dest"
+    mkdir -p "$BACKUP_DEST"
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Backup base:  $BACKUP_DEST"* ]]
+}
+
 @test "exits zero when BACKUP_BASE is empty" {
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]

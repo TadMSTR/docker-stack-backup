@@ -27,7 +27,10 @@ source "$SCRIPT_DIR/lib.sh"
 
 detect_os
 
-BACKUP_BASE="${BACKUP_BASE:-/mnt/backup/docker-backups}"
+# The backup writes BACKUP_DEST; read the same place unless BACKUP_BASE overrides it.
+# Reading only BACKUP_BASE sent this script to a default path a config that sets
+# BACKUP_DEST (as config.example.sh does) never wrote to (#1091).
+BACKUP_BASE="${BACKUP_BASE:-${BACKUP_DEST:-/mnt/backup/docker-backups}}"
 LOG_FILE="${LOG_FILE:-/dev/null}"
 
 
@@ -73,8 +76,8 @@ list_backups() {
             fi
             
             local timestamp; timestamp=$(basename "$backup_dir")
-            local backup_count; backup_count=$(find "$backup_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l)
-            local total_size; total_size=$(du -sh "$backup_dir" | cut -f1)
+            local backup_count; backup_count=$(find "$backup_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || backup_count=0
+            local total_size; total_size=$(du_size "$backup_dir" -h) || true
             
             echo "  $timestamp - $backup_count stacks - $total_size"
             
@@ -82,7 +85,7 @@ list_backups() {
                 if [[ -f "$backup_file" ]]; then
                     local fname; fname=$(basename "$backup_file")
                     local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
-                    local file_size; file_size=$(du -sh "$backup_file" | cut -f1)
+                    local file_size; file_size=$(du_size "$backup_file" -h) || true
                     echo "    - $stack_name ($file_size)"
                 fi
             done
@@ -155,21 +158,29 @@ show_stats() {
             continue
         fi
         
-        local backup_sets; backup_sets=$(find "$host_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)
-        local total_backups; total_backups=$(find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l)
-        local total_size; total_size=$(du -sh "$host_dir" 2>/dev/null | cut -f1)
-        
-        local oldest_backup; oldest_backup=$(find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T+ %p\n' 2>/dev/null | sort | head -1 | cut -d' ' -f1)
-        local newest_backup; newest_backup=$(find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T+ %p\n' 2>/dev/null | sort | tail -1 | cut -d' ' -f1)
+        local backup_sets; backup_sets=$(find "$host_dir" -mindepth 1 -maxdepth 1 -type d | wc -l) || backup_sets=0
+        local total_size; total_size=$(du_size "$host_dir" -h) || true
+
+        # One pass: count, oldest and newest mtime (as YYYY-MM-DD) from a single find.
+        # awk reads to EOF. `sort | head -1` here died of SIGPIPE (rc 141 under
+        # pipefail) once the listing outgrew the pipe buffer — forge's share, ~930
+        # archives, every time (#1099).
+        local total_backups=0 oldest_backup="" newest_backup=""
+        read -r total_backups oldest_backup newest_backup < <(
+            find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T@ %TY-%Tm-%Td\n' 2>/dev/null |
+                awk 'NR == 1 || $1 < min { min = $1; old = $2 }
+                     NR == 1 || $1 > max { max = $1; new = $2 }
+                     END { print NR, old, new }'
+        ) || true
         
         echo -e "${GREEN}$hostname${NC}"
         echo "  Backup sets: $backup_sets"
-        echo "  Total backups: $total_backups"
+        echo "  Total backups: ${total_backups:-0}"
         echo "  Total size: $total_size"
         
         if [[ -n "$oldest_backup" ]]; then
-            echo "  Oldest: $(date -d "${oldest_backup%T*}" +'%Y-%m-%d')"
-            echo "  Newest: $(date -d "${newest_backup%T*}" +'%Y-%m-%d')"
+            echo "  Oldest: $oldest_backup"
+            echo "  Newest: $newest_backup"
         fi
         echo
     done

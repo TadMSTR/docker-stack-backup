@@ -27,7 +27,10 @@ source "$SCRIPT_DIR/lib.sh"
 
 detect_os
 
-BACKUP_BASE="${BACKUP_BASE:-/mnt/backup/docker-backups}"
+# The backup writes BACKUP_DEST; read the same place unless BACKUP_BASE overrides it.
+# Reading only BACKUP_BASE sent this script to a default path a config that sets
+# BACKUP_DEST (as config.example.sh does) never wrote to (#1091).
+BACKUP_BASE="${BACKUP_BASE:-${BACKUP_DEST:-/mnt/backup/docker-backups}}"
 DOCKHAND_BASE="${DOCKHAND_BASE:-/opt/dockhand/stacks}"
 DOCKHAND_APPEND_HOSTNAME="${DOCKHAND_APPEND_HOSTNAME:-true}"
 APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
@@ -208,26 +211,34 @@ select_stack() {
 
 #######################################
 # Preview backup contents
+# One pass over the archive (#1095): `tar -tvf` feeds awk, which prints the first 20
+# entries and, reading to EOF, the entry count and the sum of member sizes. The sum is
+# the space an extract needs, which perform_restore checks before writing anything.
+# awk never exits early, so a non-zero pipeline status is tar's: the archive could not
+# be read (an early-exiting `head` here aborted every real archive under pipefail, #1094).
 #######################################
 preview_backup() {
     print_section "Step 4: Preview Backup Contents"
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
-    # sed, not head: head exits after 20 lines, and tar then dies of SIGPIPE (or, where
-    # SIGPIPE is ignored, fails with EPIPE and exits 2). pipefail + set -e aborted the
-    # wizard here for any archive longer than the pipe buffer, i.e. every real one (#1094,
-    # found driving the wizard past Step 2). sed reads to EOF, so a non-zero status
-    # (sed exits 0, so pipefail reports tar's) means tar could not read the archive.
-    local list_rc=0
-    tar -tf "$selected_backup_file" | sed -n '1,20p' || list_rc=$?
+    local out list_rc=0
+    out=$(tar -tvf "$selected_backup_file" | awk '
+        NR <= 20 { print }
+        $3 ~ /^[0-9]+$/ { bytes += $3 }
+        END { printf "%d %.0f\n", NR, bytes }') || list_rc=$?
+    local summary="${out##*$'\n'}"
+    if [[ "$out" == *$'\n'* ]]; then
+        printf '%s\n' "${out%$'\n'*}"
+    fi
+    local total_files="${summary% *}"
     if [[ $list_rc -ne 0 ]]; then
         log_warning "Could not list $selected_backup_file (tar exit $list_rc) — the archive may be corrupt or truncated"
+        archive_extract_bytes=""
+    else
+        archive_extract_bytes="${summary#* }"
     fi
 
-    # Guard against set -e/pipefail abort: a truncated/corrupt archive makes tar -tf
-    # exit non-zero, which would kill the preview mid-run — fall back to 0 (DSBAK-9 / #24).
-    local total_files; total_files=$(tar -tf "$selected_backup_file" | wc -l) || total_files=0
     if [[ $total_files -gt 20 ]]; then
         echo -e "${YELLOW}... and $((total_files - 20)) more files${NC}"
     fi
@@ -254,16 +265,20 @@ check_conflicts() {
         log_warning "Stack directory already exists: $stack_dir"
         has_conflicts=true
         
-        # Check if stack is running
-        if (cd "$stack_dir" && docker compose ps --services --filter "status=running" 2>/dev/null | grep -q .); then
+        # Check if stack is running. get_running_services, not `ps | grep -q .`: an
+        # early-exiting grep under pipefail, and a failed `ps` read as "not running".
+        local running ps_rc=0
+        running=$(get_running_services "$stack_dir") || ps_rc=$?
+        if [[ $ps_rc -ne 0 ]]; then
+            log_warning "Could not determine whether the stack is running — treat it as running"
+        elif [[ -n "$running" ]]; then
             log_warning "Stack has running containers!"
-            has_conflicts=true
         fi
     fi
     
     # Check if appdata exists
     if [[ -d "$appdata_dir" ]]; then
-        local appdata_size; appdata_size=$(du -sh "$appdata_dir" | cut -f1)
+        local appdata_size; appdata_size=$(du_size "$appdata_dir" -h) || true
         log_warning "Appdata directory already exists: $appdata_dir ($appdata_size)"
         has_conflicts=true
     fi
@@ -301,6 +316,110 @@ check_conflicts() {
 }
 
 #######################################
+# Free space
+# fs_free <dir> — prints "<free bytes> <mount point>" for the filesystem holding <dir>
+#######################################
+fs_free() {
+    df -PB1 -- "$1" 2>/dev/null | awk 'NR == 2 { print $4, $6 }'
+}
+
+#######################################
+# Space check, before Step 6 writes anything
+# The extract is staged under TMPDIR (mktemp -d) and, in backup_first mode, the old
+# stack dir + appdata are copied under RESTORE_SAFETY_DIR. Both must fit, summed when
+# they share a filesystem. The extract size is the sum of member sizes from Step 4's
+# listing; if that was unavailable, the archive's own size (a compressed archive will
+# extract larger).
+#######################################
+check_restore_space() {
+    local stack_dir="$1" appdata_dir="$2" safety_base="$3"
+    local temp_base="${TMPDIR:-/tmp}"
+
+    local need_extract="${archive_extract_bytes:-}"
+    if [[ ! "$need_extract" =~ ^[0-9]+$ ]]; then
+        need_extract=$(stat -c %s -- "$selected_backup_file" 2>/dev/null) || need_extract=0
+    fi
+    local need_safety=0
+    if [[ "$restore_mode" == "backup_first" ]]; then
+        local sz
+        if [[ -d "$stack_dir" ]]; then
+            sz=$(du_size "$stack_dir") || true
+            need_safety=$((need_safety + sz))
+        fi
+        if [[ -d "$appdata_dir" ]]; then
+            sz=$(du_size "$appdata_dir") || true
+            need_safety=$((need_safety + sz))
+        fi
+    fi
+
+    local temp_free temp_mnt safety_free safety_mnt
+    read -r temp_free temp_mnt <<< "$(fs_free "$temp_base")" || true
+    read -r safety_free safety_mnt <<< "$(fs_free "$safety_base")" || true
+    if [[ ! "${temp_free:-}" =~ ^[0-9]+$ ]]; then
+        log_error "Cannot read free space for TMPDIR ($temp_base)"
+        return 1
+    fi
+
+    local -a checks=()
+    if [[ $need_safety -gt 0 && -n "${safety_mnt:-}" && "$safety_mnt" != "$temp_mnt" ]]; then
+        checks+=("$temp_mnt $temp_free $need_extract" "$safety_mnt ${safety_free:-0} $need_safety")
+    else
+        checks+=("$temp_mnt $temp_free $((need_extract + need_safety))")
+    fi
+
+    local c mnt free need ok=true
+    for c in "${checks[@]}"; do
+        read -r mnt free need <<< "$c"
+        if [[ $free -lt $need ]]; then
+            log_error "Not enough space on $mnt for the restore: need $(numfmt --to=iec-i --suffix=B "$need"), $(numfmt --to=iec-i --suffix=B "$free") free"
+            ok=false
+        fi
+    done
+    if [[ "$ok" != true ]]; then
+        log_error "Nothing was changed. Point TMPDIR (extract: $temp_base) and/or RESTORE_SAFETY_DIR (pre-restore copy: $safety_base) at a filesystem with room."
+        return 1
+    fi
+    return 0
+}
+
+#######################################
+# Replace the stack's config and appdata with the extracted backup.
+# Returns non-zero at the first failed step; the caller reports it (the stack is down
+# by then, so the operator needs to know where things stand).
+#######################################
+replace_stack_files() {
+    local temp_restore="$1" stack_dir="$2" appdata_dir="$3"
+
+    log "Restoring stack configuration..."
+    mkdir -p "$stack_dir" || return 1
+
+    # The backup archives whichever compose file the stack uses (find_compose_file), so
+    # restore whichever is there, not only docker-compose.yml.
+    local name restored_compose=false
+    for name in compose.yaml compose.yml docker-compose.yaml docker-compose.yml .env; do
+        if [[ -f "$temp_restore/$name" ]]; then
+            cp -p "$temp_restore/$name" "$stack_dir/" || return 1
+            [[ "$name" != .env ]] && restored_compose=true
+        fi
+    done
+    if [[ "$restored_compose" != true ]]; then
+        log_warning "The backup holds no compose file; kept the stack dir's existing one"
+    fi
+
+    log "Restoring appdata..."
+    if [[ ! -d "$temp_restore/$selected_stack" ]]; then
+        # Never delete the live appdata when there is nothing to put in its place.
+        log_warning "The backup holds no $selected_stack/ appdata; existing appdata left as is"
+        return 0
+    fi
+    if [[ -d "$appdata_dir" ]]; then
+        rm -rf "$appdata_dir" || return 1
+    fi
+    cp -a "$temp_restore/$selected_stack" "$APPDATA_PATH/" || return 1
+    return 0
+}
+
+#######################################
 # Perform restore
 #######################################
 perform_restore() {
@@ -308,59 +427,57 @@ perform_restore() {
     
     local stack_dir; stack_dir="$(dockhand_stack_base "$selected_hostname")/$selected_stack"
     local appdata_dir="$APPDATA_PATH/$selected_stack"
+    local safety_base="${RESTORE_SAFETY_DIR:-${TMPDIR:-/tmp}}"
+
+    check_restore_space "$stack_dir" "$appdata_dir" "$safety_base" || return 1
+
     local temp_restore; temp_restore=$(mktemp -d)
+    # Disarm the trap once it has fired. Without `trap - RETURN`, it stays installed and
+    # fires again on the NEXT function return (print_section in main), where
+    # $temp_restore is out of scope — aborting under `set -u` with "temp_restore:
+    # unbound variable" and exiting 1 after a successful restore (#1098; the same class
+    # PR #11 fixed in backup_stack).
+    trap 'rm -rf "$temp_restore"; trap - RETURN' RETURN
     
-    trap 'rm -rf "$temp_restore"' RETURN
-    
-    # Handle existing data based on mode
-    if [[ "$restore_mode" == "backup_first" ]]; then
-        local safety_backup_dir; safety_backup_dir="/tmp/docker-restore-backup-$(date +%Y%m%d_%H%M%S)"
-        mkdir -p "$safety_backup_dir"
-        
-        log "Creating safety backup in $safety_backup_dir"
-        
-        if [[ -d "$stack_dir" ]]; then
-            cp -a "$stack_dir" "$safety_backup_dir/stack"
-        fi
-        
-        if [[ -d "$appdata_dir" ]]; then
-            cp -a "$appdata_dir" "$safety_backup_dir/appdata"
-        fi
-        
-        log_success "Safety backup created"
+    # Extract first, while the stack is still up: a corrupt archive or a full disk
+    # then costs no downtime and changes nothing.
+    log "Extracting backup..."
+    if ! tar -xf "$selected_backup_file" -C "$temp_restore"; then
+        log_error "Could not extract $selected_backup_file — nothing was changed"
+        return 1
     fi
-    
+
     # Stop existing containers if any
     if [[ -d "$stack_dir" ]]; then
         log "Stopping existing stack"
         (cd "$stack_dir" && docker compose down 2>/dev/null) || true
     fi
-    
-    # Extract backup to temp directory
-    log "Extracting backup..."
-    tar -xf "$selected_backup_file" -C "$temp_restore"
-    
-    # Restore compose files
-    log "Restoring stack configuration..."
-    mkdir -p "$stack_dir"
-    
-    if [[ -f "$temp_restore/docker-compose.yml" ]]; then
-        cp "$temp_restore/docker-compose.yml" "$stack_dir/"
+
+    # Safety copy after the stop, so it is a consistent copy of the old data.
+    if [[ "$restore_mode" == "backup_first" ]]; then
+        # mktemp: a fresh 0700 dir, never an existing (or planted) path in a shared /tmp.
+        if ! mkdir -p -- "$safety_base" || ! safety_backup_dir=$(mktemp -d "$safety_base/docker-restore-backup-${selected_stack}-$(date +%Y%m%d_%H%M%S).XXXXXX"); then
+            safety_backup_dir=""
+            log_error "Cannot create a safety backup dir under $safety_base — existing data NOT replaced. The stack is stopped; start it again with:"
+            echo "  cd $stack_dir && docker compose up -d"
+            return 1
+        fi
+        log "Creating safety backup in $safety_backup_dir"
+        if ! { { [[ ! -d "$stack_dir" ]] || cp -a "$stack_dir" "$safety_backup_dir/stack"; } \
+                && { [[ ! -d "$appdata_dir" ]] || cp -a "$appdata_dir" "$safety_backup_dir/appdata"; }; }; then
+            log_error "Safety backup failed — existing data NOT replaced. The stack is stopped; start it again with:"
+            echo "  cd $stack_dir && docker compose up -d"
+            return 1
+        fi
+        log_success "Safety backup created"
     fi
-    
-    if [[ -f "$temp_restore/.env" ]]; then
-        cp "$temp_restore/.env" "$stack_dir/"
-    fi
-    
-    # Restore appdata
-    log "Restoring appdata..."
-    
-    if [[ -d "$appdata_dir" ]]; then
-        rm -rf "$appdata_dir"
-    fi
-    
-    if [[ -d "$temp_restore/$selected_stack" ]]; then
-        cp -a "$temp_restore/$selected_stack" "$APPDATA_PATH/"
+
+    if ! replace_stack_files "$temp_restore" "$stack_dir" "$appdata_dir"; then
+        log_error "Restore failed while replacing files in $stack_dir / $appdata_dir"
+        if [[ -n "${safety_backup_dir:-}" ]]; then
+            log_error "The pre-restore copy is in $safety_backup_dir"
+        fi
+        return 1
     fi
     
     log_success "Files restored successfully"
@@ -373,9 +490,10 @@ perform_restore() {
             log_success "Stack started successfully"
             
             echo -e "\n${GREEN}Container status:${NC}"
-            (cd "$stack_dir" && docker compose ps)
+            (cd "$stack_dir" && docker compose ps) || true
         else
-            log_error "Failed to start stack"
+            log_error "Failed to start stack. The files are restored; start it manually with:"
+            echo "  cd $stack_dir && docker compose up -d"
             return 1
         fi
     else
@@ -426,6 +544,9 @@ main() {
     print_section "Restore Complete!"
     
     log_success "Stack '$selected_stack' has been restored from backup"
+    if [[ -n "${safety_backup_dir:-}" ]]; then
+        log "Pre-restore copy of the old data: $safety_backup_dir"
+    fi
     echo -e "\n${GREEN}✓ All done!${NC}\n"
     
     log "========================================="

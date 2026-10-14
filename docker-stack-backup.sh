@@ -312,8 +312,8 @@ simulate_backup_stack() {
     fi
     
     # Get appdata size
-    local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
-    local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
+    local size; size=$(du_size "$appdata_dir" -h) || size="~$size"
+    local size_bytes; size_bytes=$(du_size "$appdata_dir") || true
     
     # Get running containers. A failed check is a would-fail, never "stopped".
     local running ps_rc=0
@@ -337,9 +337,9 @@ simulate_backup_stack() {
     
     # Output stack info
     if [[ $running_count -gt 0 ]]; then
-        echo "  ${GREEN}✓${NC} $stack_name ($size appdata, $running_count running)"
+        echo -e "  ${GREEN}✓${NC} $stack_name ($size appdata, $running_count running)"
     else
-        echo "  ${YELLOW}○${NC} $stack_name ($size appdata, stopped — archived without stop/start)"
+        echo -e "  ${YELLOW}○${NC} $stack_name ($size appdata, stopped — archived without stop/start)"
     fi
     
     # Return size in bytes for calculation
@@ -626,14 +626,14 @@ main() {
         if [[ ${#skip_list[@]} -gt 0 ]]; then
             echo -e "\n${YELLOW}Would skip:${NC}\n"
             for stack_name in "${skip_list[@]}"; do
-                echo "  ${YELLOW}○${NC} $stack_name"
+                echo -e "  ${YELLOW}○${NC} $stack_name"
             done
         fi
         
         if [[ ${#fail_list[@]} -gt 0 ]]; then
             echo -e "\n${RED}Would fail:${NC}\n"
             for stack_name in "${fail_list[@]}"; do
-                echo "  ${RED}✗${NC} $stack_name"
+                echo -e "  ${RED}✗${NC} $stack_name"
             done
         fi
         
@@ -643,13 +643,13 @@ main() {
         echo -e "\n${CYAN}=========================================${NC}"
         echo -e "${BOLD}Summary:${NC}"
         echo "  Total stacks found: $total_stacks"
-        echo "  Would backup: ${GREEN}$backed_up${NC}"
-        echo "  Would skip: ${YELLOW}$skipped${NC}"
+        echo -e "  Would backup: ${GREEN}$backed_up${NC}"
+        echo -e "  Would skip: ${YELLOW}$skipped${NC}"
         if [[ $failed -gt 0 ]]; then
-            echo "  Would fail: ${RED}$failed${NC}"
+            echo -e "  Would fail: ${RED}$failed${NC}"
         fi
         echo ""
-        echo "  Estimated backup size: ${BOLD}$total_size_human${NC}"
+        echo -e "  Estimated backup size: ${BOLD}$total_size_human${NC}"
         echo "  Compression method: ${COMPRESSION_METHOD}"
         echo "  Backup extension: ${backup_ext}"
         echo ""
