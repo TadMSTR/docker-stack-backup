@@ -621,7 +621,7 @@ perform_backup() {
         
         echo -e "${CYAN}Selected stacks:${NC}\n"
         
-        local total_size=0
+        local total_size=0 would_backup=0 would_fail=0
         for stack_path in "${selected_stacks[@]}"; do
             local stack_name; stack_name=$(basename "$stack_path")
             local appdata_dir="$APPDATA_PATH/$stack_name"
@@ -629,14 +629,18 @@ perform_backup() {
             if [[ -d "$appdata_dir" ]]; then
                 local size; size=$(du_size "$appdata_dir" -h) || size="~$size"
                 local size_bytes; size_bytes=$(du_size "$appdata_dir") || true
-                total_size=$((total_size + size_bytes))
                 
                 local running_services ps_rc=0
                 running_services=$(get_running_services "$stack_path") || ps_rc=$?
                 
                 if [[ $ps_rc -ne 0 ]]; then
+                    would_fail=$((would_fail + 1))
                     echo -e "  ${RED}✗${NC} $stack_name ($size, state unknown — would fail)"
-                elif [[ -n "$running_services" ]]; then
+                    continue
+                fi
+                would_backup=$((would_backup + 1))
+                total_size=$((total_size + size_bytes))
+                if [[ -n "$running_services" ]]; then
                     echo -e "  ${GREEN}✓${NC} $stack_name ($size, $(wc -l <<< "$running_services") running)"
                 else
                     echo -e "  ${YELLOW}○${NC} $stack_name ($size, stopped)"
@@ -648,13 +652,17 @@ perform_backup() {
         
         echo -e "\n${BLUE}═══════════════════════════════════════════════════════${NC}"
         echo -e "Total stacks: ${BOLD}${#selected_stacks[@]}${NC}"
+        echo -e "Would backup: ${BOLD}$would_backup${NC}"
+        if [[ $would_fail -gt 0 ]]; then
+            echo -e "Would fail: ${RED}$would_fail${NC}"
+        fi
         echo -e "Estimated backup size: ${BOLD}$total_size_human${NC}"
         echo -e "Compression: ${COMPRESSION_METHOD}"
         echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
         
         echo -e "\n${BOLD}${GREEN}DRY RUN COMPLETE - No actions taken${NC}\n"
         
-        log "Dry run complete: ${#selected_stacks[@]} stacks would be backed up"
+        log "Dry run complete: $would_backup stacks would be backed up, $would_fail would fail"
         log "Estimated size: $total_size_human"
         
         return 0

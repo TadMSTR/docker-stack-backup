@@ -320,7 +320,14 @@ check_conflicts() {
 # fs_free <dir> — prints "<free bytes> <mount point>" for the filesystem holding <dir>
 #######################################
 fs_free() {
-    df -PB1 -- "$1" 2>/dev/null | awk 'NR == 2 { print $4, $6 }'
+    # A dir that doesn't exist yet (RESTORE_SAFETY_DIR before its first use) will be
+    # created on its nearest existing ancestor's filesystem, so measure that one.
+    local dir="$1"
+    while [[ ! -d "$dir" && "$dir" == */* && -n "${dir%/*}" ]]; do
+        dir="${dir%/*}"
+    done
+    [[ -d "$dir" ]] || dir=/
+    df -PB1 -- "$dir" 2>/dev/null | awk 'NR == 2 { print $4, $6 }'
 }
 
 #######################################
@@ -394,9 +401,21 @@ replace_stack_files() {
     mkdir -p "$stack_dir" || return 1
 
     # The backup archives whichever compose file the stack uses (find_compose_file), so
-    # restore whichever is there, not only docker-compose.yml.
-    local name restored_compose=false
-    for name in compose.yaml compose.yml docker-compose.yaml docker-compose.yml .env; do
+    # restore whichever is there, not only docker-compose.yml. And when the archive has
+    # one, remove the stack dir's other compose names first: compose prefers
+    # compose.yaml > compose.yml > docker-compose.yaml > docker-compose.yml, so a
+    # leftover higher-priority file would shadow the restored one.
+    local -a compose_names=(compose.yaml compose.yml docker-compose.yaml docker-compose.yml)
+    local name other restored_compose=false
+    for name in "${compose_names[@]}"; do
+        if [[ -f "$temp_restore/$name" ]]; then
+            for other in "${compose_names[@]}"; do
+                [[ "$other" == "$name" ]] || rm -f -- "${stack_dir:?}/$other" || return 1
+            done
+            break
+        fi
+    done
+    for name in "${compose_names[@]}" .env; do
         if [[ -f "$temp_restore/$name" ]]; then
             cp -p "$temp_restore/$name" "$stack_dir/" || return 1
             [[ "$name" != .env ]] && restored_compose=true

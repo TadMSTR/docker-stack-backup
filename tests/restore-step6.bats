@@ -194,3 +194,42 @@ STUB
     grep -q '^\[SUCCESS\] Files restored successfully' "$LOG_FILE"
     ! grep -q $'\033' "$LOG_FILE"
 }
+
+@test "safety dir that doesn't exist yet: space is checked on its future filesystem" {
+    # df stub: anything under safetyfs is a small, separate filesystem; the rest is big.
+    # Like the real df, it fails on a path that doesn't exist.
+    mkdir -p "$TEST_DIR/safetyfs"
+    export RESTORE_SAFETY_DIR="$TEST_DIR/safetyfs/not/yet/created"
+    cat > "$TEST_DIR/bin/df" <<'STUB'
+#!/usr/bin/env bash
+[[ -e "${*: -1}" ]] || { echo "df: ${*: -1}: No such file or directory" >&2; exit 1; }
+echo "Filesystem 1-blocks Used Available Capacity Mounted on"
+case "${*: -1}" in
+    */safetyfs|*/safetyfs/*) echo "small 1000 990 10 99% /safetyfs" ;;
+    *) echo "big 1000000000 0 1000000000 0% /big" ;;
+esac
+STUB
+    chmod +x "$TEST_DIR/bin/df"
+    _drive_restore $'1\n1\n1\ny\n2\ny'
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Not enough space on /safetyfs"* ]]
+    ! grep -q 'compose down' "$DOCKER_LOG"
+    [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
+}
+
+@test "a restored compose file is not shadowed by a leftover higher-priority name" {
+    # Archive has docker-compose.yml; the live stack has compose.yaml, which compose
+    # would otherwise pick first.
+    local src="$TEST_DIR/src3"
+    mkdir -p "$src/cfg" "$src/appdata/web"
+    echo new-compose > "$src/cfg/docker-compose.yml"
+    echo new-data > "$src/appdata/web/data.txt"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" --owner=0 --group=0 --numeric-owner \
+        -C "$src/cfg" . -C "$src/appdata" web
+    _drive_restore $'1\n1\n1\ny\n2\ny'
+    [ "$status" -eq 0 ]
+    [ "$(cat "$STACK_DIR/docker-compose.yml")" = new-compose ]
+    [ ! -e "$STACK_DIR/compose.yaml" ]
+    # The old file survives in the safety copy.
+    [ "$(cat "$RESTORE_SAFETY_DIR"/docker-restore-backup-web-*/stack/compose.yaml)" = old-compose ]
+}

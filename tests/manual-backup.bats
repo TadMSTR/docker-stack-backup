@@ -68,4 +68,8 @@ _run_manual() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"$STACK"*"state unknown — would fail"* ]]
     [[ "$output" != *"$STACK ("*", stopped)"* ]]
+    # Counted as a would-fail, not as backed up (CR-01).
+    [[ "$output" == *"Would backup: "*"0"* ]]
+    [[ "$output" == *"Would fail: "*"1"* ]]
+    [[ "$output" == *"0 stacks would be backed up, 1 would fail"* ]]
 }

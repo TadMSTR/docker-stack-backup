@@ -27,7 +27,9 @@ script. The restore wizard's last two steps are tested for the first time.
   whichever of `compose.yaml`, `compose.yml`, `docker-compose.yaml` or
   `docker-compose.yml` it finds. Restore copied back only `docker-compose.yml`, so a stack
   using any other name came back with its old compose file, or with none if the stack dir
-  was gone.
+  was gone. When the archive has a compose file, any other compose name in the stack dir
+  is removed first, so a leftover `compose.yaml` cannot shadow a restored
+  `docker-compose.yml`. The safety copy keeps the old file.
 - **The manual script handles appdata it can't fully read** (#1092). `du -sb | cut` under
   `pipefail` exited 1 at the summary step for any root-owned appdata. This broke the
   unprivileged elevated path it exists for. The size is now an estimate, labelled
@@ -36,7 +38,8 @@ script. The restore wizard's last two steps are tested for the first time.
 - **The manual script shows "state unknown", never "stopped", when it can't tell**
   (#1090 R2-01). Its stack list, summary and dry run now use `get_running_services()`.
   A stack whose compose file fails to parse used to show as "stopped", even though the
-  backup fails such a stack.
+  backup fails such a stack. Its dry run now counts these stacks as "Would fail", leaving
+  them out of "Would backup" and the size estimate.
 - **No literal `\033[…m` in dry runs** (#1093). Dry-run lines used `echo` without `-e`.
 - **No colour codes in `LOG_FILE`.** `log_error`, `log_success` and `log_warning` tee'd the
   coloured line into the log. The terminal still gets colour; the log gets
@@ -52,8 +55,9 @@ script. The restore wizard's last two steps are tested for the first time.
 
 - **Space check before anything is written.** The extract (under `TMPDIR`) and, with
   option 2, the safety copy (under `RESTORE_SAFETY_DIR`) must both fit. The two sizes
-  are summed when they share a filesystem. The extract size is the member-size sum from
-  Step 4. If they don't fit, the wizard stops and names both variables.
+  are summed when they share a filesystem. A `RESTORE_SAFETY_DIR` that doesn't exist yet
+  is measured on its nearest existing parent. The extract size is the member-size sum
+  from Step 4. If they don't fit, the wizard stops and names both variables.
 - **The archive is extracted before the stack is stopped.** A corrupt archive now costs
   no downtime and changes nothing. The safety copy is taken after `compose down`, so it is
   a consistent copy of stopped data. `down`/`up` semantics are unchanged.
