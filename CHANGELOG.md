@@ -14,6 +14,11 @@ also stops following symlinks in an archive.
   like `BASH_VERSINFO[$(cmd)0]` ran `cmd` as the cleanup user: from cron, nightly, with
   no operator involved. The size is now the text before the first whitespace and must be
   all digits. Dirs whose names hold control bytes are skipped and logged with `%q`.
+- **The restore preview lists numeric owners** (`tar --numeric-owner -tvf`; round 4,
+  R4-01, Low). PAX owner/group names can hold line breaks, and one member's owner name
+  could replace the 20-line preview with forged lines.
+- **Cleanup checks the whole path below the base for control bytes**, not only the last
+  component (round 4, R4-02, Info).
 - **Cleanup's log is printable** (round 3, F-02, Low). Cleanup has its own `log*`
   functions (it runs standalone). They now print messages as data, with control bytes
   replaced, and no longer use `echo -e`.
@@ -75,7 +80,11 @@ also stops following symlinks in an archive.
 - One test per audit finding (F-01 to F-06, R2-01, R2-02). Round-1 tests fail on `9ea9118`;
   the four round-2 tests (real LF/ESC in a stack name, a host dir and a timestamp dir; a
   non-ASCII name under `en_US.UTF-8`) fail on `a62f2b4`. The five round-3 tests fail on
-  `5d88cdc`; on the cleanup test the injected command runs. All pass here. The
+  `5d88cdc`; on the cleanup test the injected command runs. The two round-4 tests fail on
+  `2202f48`. All pass here.
+- Known and accepted (round 4, R4-03): bytes that are not valid UTF-8 (lone 0x80-0x9f,
+  0xff) reach the cleanup log raw. Stripping them would corrupt valid UTF-8, so log
+  readers should treat the log as bytes. The
   F-01 test `exec`s the dry run so its PID is known, plants a read-only
   `/tmp/stack_size_<pid>`, and asserts that the injected command never runs.
 

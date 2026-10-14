@@ -126,7 +126,7 @@ _drive_steps() {
     mkdir -p "$TEST_DIR/bin"
     cat > "$TEST_DIR/bin/tar" <<STUB
 #!/usr/bin/env bash
-[[ "\$1" == -t* ]] && echo "\$1" >> "$TEST_DIR/tar-calls"
+for a in "\$@"; do [[ "\$a" == -t* ]] && { echo "\$a" >> "$TEST_DIR/tar-calls"; break; }; done
 exec "$real_tar" "\$@"
 STUB
     chmod +x "$TEST_DIR/bin/tar"

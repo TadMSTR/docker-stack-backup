@@ -408,3 +408,20 @@ _assert_no_raw_control() {
     [[ "$output" != *"odd"* ]]
     [[ "$output" == *"Selected stack: "*"web"* ]]
 }
+
+@test "Step 4 lists numeric owners: a multi-line PAX owner name can't forge the preview (round 4 R4-01)" {
+    # Python tarfile: GNU tar's --owner can't take the ':' these fake lines need.
+    python3 -I - "$BACKUP_BASE/testhost/20261013_020000/web.tar" <<'PY'
+import io, sys, tarfile
+fake = "root" + "".join(f"\n-rw-r--r-- root/root 1 2026-10-13 02:00 ./config/fake{i:02d}.yml" for i in range(22))
+with tarfile.open(sys.argv[1], "w", format=tarfile.PAX_FORMAT) as t:
+    for name, data, uname in (("web/config/real.yml", b"real\n", fake), ("web/b", b"b\n", "root")):
+        ti = tarfile.TarInfo(name); ti.size = len(data); ti.uname = uname; ti.gname = "root"
+        t.addfile(ti, io.BytesIO(data))
+PY
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"fake00.yml"* ]]
+    [[ "$output" == *"web/config/real.yml"* ]]
+    [[ "$output" != *"more files"* ]]
+}

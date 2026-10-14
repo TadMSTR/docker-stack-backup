@@ -265,7 +265,10 @@ preview_backup() {
     # root would be worth a second look (setuid/setgid, device, pipe, socket — audit p3a
     # F-03), N = "<count> <bytes>" at EOF. Names come escaped from tar -tv, one per line.
     local out list_rc=0
-    out=$(tar -tvf "$selected_backup_file" | awk '
+    # --numeric-owner: tar -tv prints owner/group names raw, and a PAX name can hold line
+    # breaks that replaced the preview with forged lines (round 4, R4-01). Numeric ids
+    # remove that channel; the awk field positions are unchanged.
+    out=$(tar --numeric-owner -tvf "$selected_backup_file" | awk '
         NR <= 20 { print "P\t" $0 }
         substr($1, 1, 1) ~ /[bcps]/ || substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/ { print "X\t" $0 }
         $3 ~ /^[0-9]+$/ { bytes += $3 }

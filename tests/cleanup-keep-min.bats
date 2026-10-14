@@ -161,3 +161,13 @@ _run_dir() {
     ! grep -q $'\033' "$LOG_FILE"
     ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
 }
+
+@test "a run dir under a parent whose name holds control bytes is skipped too (round 4 R4-02)" {
+    local parent="$BACKUP_BASE/evil"$'\n'"host"
+    _run_dir "$parent/run-40" 40
+    export KEEP_MIN=0
+    run bash "$SCRIPT"
+    [ "$status" -eq 0 ]
+    [ -d "$parent/run-40" ]
+    [[ "$output" == *"name contains control characters"* ]]
+}

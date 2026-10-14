@@ -174,9 +174,9 @@ main() {
         # `du -sb | cut -f1` return "<bytes>\n<rest of name>", and $(( )) below then
         # evaluated that, running `$( )` in an array subscript as the cron user (audit p3a
         # round 3, F-01). The digit check below is the fix; skipping names with control
-        # bytes keeps cleanup from deleting what no backup wrote. ${##*/}, not
-        # $(basename): command substitution would strip a trailing newline.
-        if ! has_no_control_bytes "${backup_dir##*/}"; then
+        # bytes keeps cleanup from deleting what no backup wrote. The whole path below
+        # BACKUP_BASE is checked, not only the last component (round 4, R4-02).
+        if ! has_no_control_bytes "${backup_dir#"$BACKUP_BASE"/}"; then
             log_warning "Skipping $(printf '%q' "$backup_dir"): name contains control characters"
             continue
         fi
