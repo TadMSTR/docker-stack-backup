@@ -73,6 +73,20 @@ prompt_input() {
 }
 
 #######################################
+# Names read from the share go into root's rm -rf / cp / mkdir paths. Hold them to the
+# rule the tar-create helper applies to stack names. The dotfile-skipping globs already
+# keep . and .. out, but a `shopt -s dotglob` in config.sh would silently lift that
+# (audit p3a F-04).
+#######################################
+require_plain_name() {
+    local what="$1" name="$2"
+    if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ || "$name" == -* || "$name" == . || "$name" == .. ]]; then
+        log_error "Refusing $what name '$name': only letters, digits, '.', '_' and '-' are allowed"
+        exit 1
+    fi
+}
+
+#######################################
 # Select hostname
 #######################################
 select_hostname() {
@@ -94,7 +108,7 @@ select_hostname() {
     
     echo "Available hosts:"
     for hostname in "${hostnames[@]}"; do
-        echo -e "  ${GREEN}$i)${NC} $hostname"
+        printf '  %b%s)%b %s\n' "$GREEN" "$i" "$NC" "$hostname"
         ((i++))
     done
     
@@ -107,7 +121,8 @@ select_hostname() {
     fi
     
     selected_hostname="${hostnames[$((selection-1))]}"
-    echo -e "\n${GREEN}✓${NC} Selected host: ${BOLD}$selected_hostname${NC}"
+    require_plain_name "host" "$selected_hostname"
+    printf '\n%b✓%b Selected host: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$selected_hostname" "$NC"
 }
 
 #######################################
@@ -148,7 +163,7 @@ select_timestamp() {
         # preview — fall back to 0 (DSBAK-9 / #24, same class as DSBAK-8).
         local stack_count; stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || stack_count=0
         
-        echo -e "  ${GREEN}$i)${NC} $formatted_date at $formatted_time (${stack_count} stacks)"
+        printf '  %b%s)%b %s at %s (%s stacks)\n' "$GREEN" "$i" "$NC" "$formatted_date" "$formatted_time" "$stack_count"
         ((i++))
     done
     
@@ -161,7 +176,7 @@ select_timestamp() {
     fi
     
     selected_timestamp="${timestamps[$((selection-1))]}"
-    echo -e "\n${GREEN}✓${NC} Selected backup: ${BOLD}$selected_timestamp${NC}"
+    printf '\n%b✓%b Selected backup: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$selected_timestamp" "$NC"
 }
 
 #######################################
@@ -192,7 +207,7 @@ select_stack() {
     echo "Available stacks:"
     for stack in "${stacks[@]}"; do
         local size; size=$(du -h "${stack_files[$((i-1))]}" | cut -f1)
-        echo -e "  ${GREEN}$i)${NC} $stack (${size})"
+        printf '  %b%s)%b %s (%s)\n' "$GREEN" "$i" "$NC" "$stack" "$size"
         ((i++))
     done
 
@@ -205,8 +220,9 @@ select_stack() {
     fi
 
     selected_stack="${stacks[$((selection-1))]}"
+    require_plain_name "stack" "$selected_stack"
     selected_backup_file="${stack_files[$((selection-1))]}"
-    echo -e "\n${GREEN}✓${NC} Selected stack: ${BOLD}$selected_stack${NC}"
+    printf '\n%b✓%b Selected stack: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$selected_stack" "$NC"
 }
 
 #######################################
@@ -222,15 +238,24 @@ preview_backup() {
     
     echo "Contents of backup:"
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}"
+    # awk tags its output: P = a preview line (first 20), X = a member restoring it as
+    # root would be worth a second look (setuid/setgid, device, pipe, socket — audit p3a
+    # F-03), N = "<count> <bytes>" at EOF. Names come escaped from tar -tv, one per line.
     local out list_rc=0
     out=$(tar -tvf "$selected_backup_file" | awk '
-        NR <= 20 { print }
+        NR <= 20 { print "P\t" $0 }
+        substr($1, 1, 1) ~ /[bcps]/ || substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/ { print "X\t" $0 }
         $3 ~ /^[0-9]+$/ { bytes += $3 }
-        END { printf "%d %.0f\n", NR, bytes }') || list_rc=$?
-    local summary="${out##*$'\n'}"
-    if [[ "$out" == *$'\n'* ]]; then
-        printf '%s\n' "${out%$'\n'*}"
-    fi
+        END { printf "N\t%d %.0f\n", NR, bytes }') || list_rc=$?
+    local line summary="0 0"
+    local -a special=()
+    while IFS= read -r line; do
+        case "${line%%$'\t'*}" in
+            P) printf '%s\n' "${line#*$'\t'}" ;;
+            X) special+=("${line#*$'\t'}") ;;
+            N) summary="${line#*$'\t'}" ;;
+        esac
+    done <<< "$out"
     local total_files="${summary% *}"
     if [[ $list_rc -ne 0 ]]; then
         log_warning "Could not list $selected_backup_file (tar exit $list_rc) — the archive may be corrupt or truncated"
@@ -241,6 +266,14 @@ preview_backup() {
 
     if [[ $total_files -gt 20 ]]; then
         echo -e "${YELLOW}... and $((total_files - 20)) more files${NC}"
+    fi
+    if [[ ${#special[@]} -gt 0 ]]; then
+        echo ""
+        log_warning "${#special[@]} member(s) are setuid/setgid or device/pipe/socket entries. Restored as root, they keep the owner and mode recorded in the archive:"
+        printf '  %s\n' "${special[@]:0:10}"
+        if [[ ${#special[@]} -gt 10 ]]; then
+            echo "  ... and $(( ${#special[@]} - 10 )) more"
+        fi
     fi
     echo -e "${BLUE}─────────────────────────────────────────────────────────${NC}\n"
     
@@ -276,6 +309,12 @@ check_conflicts() {
         fi
     fi
     
+    # A symlinked appdata dir: the restore replaces the link with a real dir on
+    # APPDATA_PATH's filesystem, and the link's target is left as it was (audit p3a F-06).
+    if [[ -L "$appdata_dir" ]]; then
+        log_warning "Appdata $appdata_dir is a symlink (-> $(readlink -- "$appdata_dir")): the restore replaces the link with a real directory and leaves the target untouched"
+    fi
+
     # Check if appdata exists
     if [[ -d "$appdata_dir" ]]; then
         local appdata_size; appdata_size=$(du_size "$appdata_dir" -h) || true
@@ -345,6 +384,12 @@ check_restore_space() {
     local need_extract="${archive_extract_bytes:-}"
     if [[ ! "$need_extract" =~ ^[0-9]+$ ]]; then
         need_extract=$(stat -c %s -- "$selected_backup_file" 2>/dev/null) || need_extract=0
+    fi
+    # Member sizes are as the archive declares them. 19+ digits would wrap bash's 64-bit
+    # arithmetic and make the comparison below pass (audit p3a F-05).
+    if [[ ${#need_extract} -gt 18 ]]; then
+        log_error "The archive declares an implausible total size ($need_extract bytes) — nothing was changed"
+        return 1
     fi
     local need_safety=0
     if [[ "$restore_mode" == "backup_first" ]]; then
@@ -496,6 +541,9 @@ perform_restore() {
             return 1
         fi
         log_success "Safety backup created"
+        if [[ -z "${RESTORE_SAFETY_DIR:-}" ]]; then
+            log_warning "That copy is under TMPDIR (${TMPDIR:-/tmp}), which is cleaned up (Debian: after 10 days, or at reboot on tmpfs). Move it if you need to keep it; set RESTORE_SAFETY_DIR for a lasting location."
+        fi
     fi
 
     if ! replace_stack_files "$temp_restore" "$stack_dir" "$appdata_dir"; then

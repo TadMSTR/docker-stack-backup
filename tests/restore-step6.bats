@@ -261,3 +261,73 @@ STUB
     [ ! -L "$APPDATA_PATH/web" ]
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
 }
+
+@test "an archive filename with a literal \\n cannot forge a log line (audit p3a F-02)" {
+    local src="$TEST_DIR/src5" name='web\n[2026-10-14 03:00:00] FORGED Restore completed successfully'
+    mkdir -p "$src"
+    echo forged-compose > "$src/compose.yaml"
+    # Alone in the newest run dir, so it is backup 1, stack 1. Step 3 refuses the name
+    # (F-04) and logs it in the error; that line must stay one line (F-02).
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    tar -cf "$BACKUP_BASE/testhost/20261014_020000/$name.tar" -C "$src" .
+    _drive_restore $'1\n1\n1\ny\nn'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name"* ]]
+    grep -qF "[ERROR] Refusing stack name '$name'" "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
+}
+
+@test "log_* print the message as data: a literal \\n in a message stays one line (F-02)" {
+    run bash -c 'source "$1"; LOG_FILE="$2"; log_warning "a\\nb \\033[31m"' \
+        _ "$BATS_TEST_DIRNAME/../lib.sh" "$LOG_FILE"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$LOG_FILE")" -eq 1 ]
+    grep -qxF '[WARNING] a\nb \033[31m' "$LOG_FILE"
+}
+
+@test "Step 3 refuses a stack name outside [A-Za-z0-9._-] (audit p3a F-04)" {
+    mkdir -p "$BACKUP_BASE/testhost/20261014_020000"
+    : > "$BACKUP_BASE/testhost/20261014_020000/we b.tar"
+    _drive_restore $'1\n1\n1'
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Refusing stack name 'we b'"* ]]
+    ! grep -q 'compose down' "$DOCKER_LOG"
+}
+
+@test "Step 4 flags setuid and device/pipe members before Proceed (audit p3a F-03)" {
+    local src="$TEST_DIR/src6"
+    mkdir -p "$src/web"
+    echo x > "$src/web/tool" && chmod 4755 "$src/web/tool"
+    mkfifo "$src/web/fifo"
+    echo y > "$src/web/plain"
+    tar -cf "$BACKUP_BASE/testhost/20261013_020000/web.tar" -C "$src" web
+    _drive_restore $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"2 member(s) are setuid/setgid or device/pipe/socket entries"* ]]
+    [[ "$output" == *"web/tool"* ]]
+    [[ "$output" == *"web/fifo"* ]]
+    [[ "$output" == *"Restore cancelled."* ]]
+}
+
+@test "space check refuses an archive declaring 19+ digits of size (audit p3a F-05)" {
+    run bash -c 'source "$1"; selected_backup_file=/dev/null; restore_mode=clean
+                 archive_extract_bytes=9223372036854775808
+                 check_restore_space /nonexistent/stack /nonexistent/appdata /tmp' _ "$SCRIPT"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"implausible total size"* ]]
+}
+
+@test "symlinked appdata is flagged at Step 5; default safety copy is called temporary (F-06)" {
+    mv "$APPDATA_PATH/web" "$TEST_DIR/real-web"
+    ln -s "$TEST_DIR/real-web" "$APPDATA_PATH/web"
+    unset RESTORE_SAFETY_DIR
+    _drive_restore $'1\n1\n1\ny\n2\ny'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"is a symlink (-> $TEST_DIR/real-web)"* ]]
+    [[ "$output" == *"which is cleaned up"* ]]
+    # The target is untouched; the link became a real dir holding the restored data.
+    [ "$(cat "$TEST_DIR/real-web/data.txt")" = old-data ]
+    [ ! -L "$APPDATA_PATH/web" ]
+    [ "$(cat "$APPDATA_PATH/web/data.txt")" = new-data ]
+}

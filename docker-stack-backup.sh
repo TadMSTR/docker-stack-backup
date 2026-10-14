@@ -285,6 +285,7 @@ simulate_backup_stack() {
     local stack_name; stack_name=$(basename "$stack_path")
     STACK_SKIP_REASON=""
     STACK_FAIL_REASON=""
+    STACK_SIZE_BYTES=0
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
@@ -342,8 +343,11 @@ simulate_backup_stack() {
         echo -e "  ${YELLOW}○${NC} $stack_name ($size appdata, stopped — archived without stop/start)"
     fi
     
-    # Return size in bytes for calculation
-    echo "$size_bytes" > /tmp/stack_size_$$
+    # Size for the total, through a global like STACK_SKIP_REASON. It used to go through
+    # /tmp/stack_size_$$, a predictable name: a file planted there by another user survives
+    # root's write (fs.protected_regular) and its content was then evaluated in $(( )),
+    # which runs command substitutions in array subscripts (audit p3a F-01).
+    STACK_SIZE_BYTES="$size_bytes"
     
     return 0  # Success
 }
@@ -609,10 +613,9 @@ main() {
             local stack_name; stack_name=$(basename "$stack_path")
             if [[ $sim_rc -eq 0 ]]; then
                 backed_up=$((backed_up + 1))
-                if [[ -f /tmp/stack_size_$$ ]]; then
-                    local stack_size; stack_size=$(cat /tmp/stack_size_$$)
-                    total_size=$((total_size + stack_size))
-                    rm -f /tmp/stack_size_$$
+                # Digits only before arithmetic: $(( )) evaluates its operand's content.
+                if [[ "${STACK_SIZE_BYTES:-}" =~ ^[0-9]+$ ]]; then
+                    total_size=$((total_size + STACK_SIZE_BYTES))
                 fi
             elif [[ $sim_rc -eq 2 ]]; then
                 skip_list+=("$stack_name (${STACK_SKIP_REASON:-unknown})")

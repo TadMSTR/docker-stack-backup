@@ -68,7 +68,7 @@ list_backups() {
             continue
         fi
         
-        echo -e "${GREEN}Host: $hostname${NC}"
+        printf '%bHost: %s%b\n' "$GREEN" "$hostname" "$NC"
         
         for backup_dir in "$host_dir"/*; do
             if [[ ! -d "$backup_dir" ]]; then
@@ -114,7 +114,7 @@ verify_backups() {
             continue
         fi
         
-        echo -e "${GREEN}Verifying: $hostname${NC}"
+        printf '%bVerifying: %s%b\n' "$GREEN" "$hostname" "$NC"
         
         for backup_file in "$host_dir"/*/*.tar.* "$host_dir"/*/*.tar; do
             if [[ ! -f "$backup_file" ]]; then
@@ -126,10 +126,10 @@ verify_backups() {
             local relative_path="${backup_file#$BACKUP_BASE/}"
             
             if tar -tf "$backup_file" &>/dev/null; then
-                echo -e "  ${GREEN}✓${NC} $relative_path"
+                printf '  %b✓%b %s\n' "$GREEN" "$NC" "$relative_path"
                 total_valid=$((total_valid + 1))
             else
-                echo -e "  ${RED}✗${NC} $relative_path"
+                printf '  %b✗%b %s\n' "$RED" "$NC" "$relative_path"
                 total_invalid=$((total_invalid + 1))
             fi
         done
@@ -173,7 +173,7 @@ show_stats() {
                      END { print NR, old, new }'
         ) || true
         
-        echo -e "${GREEN}$hostname${NC}"
+        printf '%b%s%b\n' "$GREEN" "$hostname" "$NC"
         echo "  Backup sets: $backup_sets"
         echo "  Total backups: ${total_backups:-0}"
         echo "  Total size: $total_size"

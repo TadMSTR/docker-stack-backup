@@ -1,8 +1,36 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.3] — 2026-10-14
+
+The fixes from the v0.5.2 security audit (audit p3a, 1 Medium, 2 Low, 3 Info). Restore
+also stops following symlinks in an archive.
 
 ### Security
+
+- **The dry run no longer evaluates a planted file as code** (audit F-01, Medium; predates
+  0.5.x). `docker-stack-backup.sh --dry-run` passed each stack's size through
+  `/tmp/stack_size_$$` and added what it read back inside `$(( ))`. Bash arithmetic runs
+  command substitutions in array subscripts. With `fs.protected_regular` (Debian's
+  default), another user's file planted at that name survives root's write. So
+  `BASH_VERSINFO[$(cmd)]` ran as whoever ran the dry run, root included under sudo. The
+  size now goes through a variable, and it must be digits before any arithmetic.
+- **Archive and host names can no longer forge log lines** (F-02, Low). `log_*` and the
+  wizard's list lines used `echo -e`, so a literal `\n` or `\033` in a name on the share
+  became a new line or an escape sequence in `/var/log/docker-restore.log` and on root's
+  terminal. Escapes are now interpreted only in the colour codes, and messages are
+  printed as data.
+- **Step 4 flags members worth a second look** (F-03, Low): setuid/setgid files and
+  device, pipe or socket entries are counted and listed (up to 10) before "Proceed with
+  restore?". USAGE.md now says the backup share is a root trust boundary.
+- **Host and stack names from the share must be plain** (F-04, Info):
+  `[A-Za-z0-9._-]+`, not `.`, `..` or a leading `-`, the same rule the tar-create helper
+  applies. The globs already skipped dotfiles, but `shopt -s dotglob` in config.sh would
+  have lifted that.
+- **The space check refuses archives declaring 19+ digits of size** (F-05, Info). Such a
+  size wrapped bash's 64-bit arithmetic and passed the check.
+- **Symlinked appdata is flagged at Step 5, and the default safety copy is called
+  temporary** (F-06, Info). Under the default `TMPDIR`, the wizard says the copy will be
+  cleaned up and points to `RESTORE_SAFETY_DIR`.
 
 - **Restore no longer follows symlinks in an archive's config files or appdata dir.** It
   runs as root. v0.5.1 checked `docker-compose.yml` with `[[ -f ]]` and copied it with a
@@ -13,6 +41,12 @@
   written through. A `<stack>` member that is a symlink no longer replaces the live
   appdata. Found by the pre-audit security baseline (FW-21 class). Test:
   `restore-step6.bats` "symlinks in the archive are not followed…" fails on v0.5.2.
+
+### Tests
+
+- One test per audit finding (F-01 to F-06). All 7 fail on `9ea9118` and pass here. The
+  F-01 test `exec`s the dry run so its PID is known, plants a read-only
+  `/tmp/stack_size_<pid>`, and asserts that the injected command never runs.
 
 ## [0.5.2] — 2026-10-14
 

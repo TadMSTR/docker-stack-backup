@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.5.2"
+DSB_VERSION="0.5.3"
 
 #######################################
 # OS Detection
@@ -69,15 +69,18 @@ log() {
 
 # Coloured line on the terminal, plain line in LOG_FILE: tee-ing the coloured line put
 # raw escape codes into every log reader's input. With no LOG_FILE, the coloured line
-# goes to stdout and stderr, as before.
+# goes to stdout and stderr, as before. Escapes are interpreted in the colour codes
+# only; the message is printed as data (%s). Messages carry names read from the backup
+# share, and `echo -e` turned a literal "\n" in an archive filename into a forged log
+# line (audit p3a F-02).
 _log_tagged() {
     local color="$1" tag="$2"; shift 2
     if [[ -z "${LOG_FILE:-}" ]]; then
-        echo -e "${color}${tag}${NC} $*" | tee -a /dev/stderr
+        printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$*" | tee -a /dev/stderr
         return
     fi
-    echo -e "${color}${tag}${NC} $*"
-    echo -e "${tag} $*" >> "$LOG_FILE"
+    printf '%b%s%b %s\n' "$color" "$tag" "$NC" "$*"
+    printf '%s %s\n' "$tag" "$*" >> "$LOG_FILE"
 }
 
 log_error() {

@@ -63,3 +63,19 @@ teardown() {
         return 1
     fi
 }
+
+@test "dry run never reads a planted /tmp/stack_size_<pid> (audit p3a F-01)" {
+    [[ $EUID -eq 0 ]] && skip "root overwrites the read-only plant; needs an unprivileged user"
+    # exec keeps the PID, so the plant is at the exact path the old code read. Read-only,
+    # so the script's own write fails and the planted content survives, as with
+    # fs.protected_regular across users. The old code evaluated it in $(( )).
+    local mark="$TEST_DIR/injected" pidfile="$TEST_DIR/pid"
+    run bash -c 'plant=/tmp/stack_size_$$
+                 echo "$$" > "$3"
+                 printf "%s\n" "BASH_VERSINFO[\$(touch $1)]" > "$plant"; chmod 444 "$plant"
+                 exec bash "$2" --dry-run' \
+        _ "$mark" "$BATS_TEST_DIRNAME/../docker-stack-backup.sh" "$pidfile"
+    rm -f "/tmp/stack_size_$(cat "$pidfile")"
+    [ ! -e "$mark" ]
+    [[ "$output" == *"Would backup"* ]]
+}

@@ -84,7 +84,17 @@ Restore stages the extracted archive under `TMPDIR` (default `/tmp`). With optio
 Step 5, it also writes a pre-restore copy of the old stack dir and appdata under
 `RESTORE_SAFETY_DIR` (default `TMPDIR`). Before Step 6 changes anything, it checks that
 both fit and stops with a message naming these variables if they don't. On a host with a
-small `/tmp`, run it as `sudo TMPDIR=/srv/scratch ./docker-stack-restore.sh`.
+small `/tmp`, run it as `sudo TMPDIR=/srv/scratch ./docker-stack-restore.sh`. Under the
+default `TMPDIR` the safety copy is **temporary**. Debian removes `/tmp` files after 10 days,
+and a tmpfs `/tmp` is emptied at reboot. Set `RESTORE_SAFETY_DIR` in `config.sh` to keep it.
+
+> **The backup share is a root trust boundary.** Restore runs as root and puts back what the
+> archive holds: owners, modes, setuid bits and device nodes. The archived `compose.yaml` and
+> `.env` are what `docker compose up -d` runs. Anyone who can write the share can therefore
+> act as root on the host you restore to. Keep the share writable only by the backup user,
+> and keep that user as trusted as root. Step 4 lists any setuid/setgid, device, pipe or
+> socket members before you confirm. Symlinked `compose`/`.env`/appdata members are refused,
+> and names outside `[A-Za-z0-9._-]` are rejected.
 
 ### Backup Destination Setup
 
