@@ -297,7 +297,7 @@ get_stack_info() {
     if stack_has_appdata "$compose_file"; then
         local appdata_dir="$APPDATA_PATH/$stack_name"
         if [[ -d "$appdata_dir" ]]; then
-            local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
+            local size; size=$(du_size "$appdata_dir" -h) || size="~$size"
             info="appdata: $size"
         else
             info="appdata: (missing)"
@@ -306,11 +306,14 @@ get_stack_info() {
         info="no appdata"
     fi
     
-    # Check running status
-    local running_count=0
-    if (cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | grep -q .); then
-        running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running_count=0
-        info="$info, ${GREEN}$running_count running${NC}"
+    # Check running status. A failed check is "state unknown", never "stopped": the
+    # backup itself fails such a stack (#1090 R2-01).
+    local running ps_rc=0
+    running=$(get_running_services "$stack_path") || ps_rc=$?
+    if [[ $ps_rc -ne 0 ]]; then
+        info="$info, ${RED}state unknown${NC}"
+    elif [[ -n "$running" ]]; then
+        info="$info, ${GREEN}$(wc -l <<< "$running") running${NC}"
     else
         info="$info, ${YELLOW}stopped${NC}"
     fi
@@ -438,10 +441,13 @@ show_summary() {
             stacks_with_appdata=$((stacks_with_appdata + 1))
             local appdata_dir="$APPDATA_PATH/$stack_name"
             if [[ -d "$appdata_dir" ]]; then
-                local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
-                local size_human; size_human=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
+                # du_size, not `du | cut` under pipefail: root-owned appdata that this
+                # user can't fully read used to abort the script right here (#1092).
+                local size_bytes size_human size_note=""
+                size_bytes=$(du_size "$appdata_dir") || size_note=" (estimate — unreadable paths excluded)"
+                size_human=$(du_size "$appdata_dir" -h) || true
                 total_size=$((total_size + size_bytes))
-                echo "  └─ Appdata: $size_human"
+                echo "  └─ Appdata: $size_human$size_note"
             else
                 log_warning "  └─ Appdata directory not found (will skip)"
             fi
@@ -449,9 +455,13 @@ show_summary() {
             log_warning "  └─ No appdata (will skip)"
         fi
         
-        # Check running containers
-        local running; running=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running=0
-        if [[ $running -gt 0 ]]; then
+        # Check running containers. A failed check is "state unknown", never "stopped".
+        local running_services ps_rc=0
+        running_services=$(get_running_services "$stack_path") || ps_rc=$?
+        if [[ $ps_rc -ne 0 ]]; then
+            echo -e "  └─ Status: ${RED}state unknown (docker compose ps failed or disagrees with docker ps; the backup will fail this stack)${NC}"
+        elif [[ -n "$running_services" ]]; then
+            local running; running=$(wc -l <<< "$running_services")
             running_stacks=$((running_stacks + 1))
             echo -e "  └─ Status: ${GREEN}$running container(s) running (will be stopped during backup)${NC}"
         else
@@ -579,7 +589,7 @@ backup_stack() {
     if create_archive_atomic "$backup_file" \
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | sed 's/^/     /'; then
-        local backup_size; backup_size=$(du -sh "$backup_file" | cut -f1)
+        local backup_size; backup_size=$(du_size "$backup_file" -h) || true
         echo -e "  └─ ${GREEN}✓${NC} Backup created: $backup_size"
     else
         log_error "Failed to create backup for $stack_name"
@@ -611,20 +621,27 @@ perform_backup() {
         
         echo -e "${CYAN}Selected stacks:${NC}\n"
         
-        local total_size=0
+        local total_size=0 would_backup=0 would_fail=0
         for stack_path in "${selected_stacks[@]}"; do
             local stack_name; stack_name=$(basename "$stack_path")
             local appdata_dir="$APPDATA_PATH/$stack_name"
             
             if [[ -d "$appdata_dir" ]]; then
-                local size; size=$(du -sh "$appdata_dir" 2>/dev/null | cut -f1)
-                local size_bytes; size_bytes=$(du -sb "$appdata_dir" 2>/dev/null | cut -f1)
+                local size; size=$(du_size "$appdata_dir" -h) || size="~$size"
+                local size_bytes; size_bytes=$(du_size "$appdata_dir") || true
+                
+                local running_services ps_rc=0
+                running_services=$(get_running_services "$stack_path") || ps_rc=$?
+                
+                if [[ $ps_rc -ne 0 ]]; then
+                    would_fail=$((would_fail + 1))
+                    echo -e "  ${RED}✗${NC} $stack_name ($size, state unknown — would fail)"
+                    continue
+                fi
+                would_backup=$((would_backup + 1))
                 total_size=$((total_size + size_bytes))
-                
-                local running_count; running_count=$(cd "$stack_path" && docker compose ps --services --filter "status=running" 2>/dev/null | wc -l) || running_count=0
-                
-                if [[ $running_count -gt 0 ]]; then
-                    echo -e "  ${GREEN}✓${NC} $stack_name ($size, $running_count running)"
+                if [[ -n "$running_services" ]]; then
+                    echo -e "  ${GREEN}✓${NC} $stack_name ($size, $(wc -l <<< "$running_services") running)"
                 else
                     echo -e "  ${YELLOW}○${NC} $stack_name ($size, stopped)"
                 fi
@@ -635,13 +652,17 @@ perform_backup() {
         
         echo -e "\n${BLUE}═══════════════════════════════════════════════════════${NC}"
         echo -e "Total stacks: ${BOLD}${#selected_stacks[@]}${NC}"
+        echo -e "Would backup: ${BOLD}$would_backup${NC}"
+        if [[ $would_fail -gt 0 ]]; then
+            echo -e "Would fail: ${RED}$would_fail${NC}"
+        fi
         echo -e "Estimated backup size: ${BOLD}$total_size_human${NC}"
         echo -e "Compression: ${COMPRESSION_METHOD}"
         echo -e "${BLUE}═══════════════════════════════════════════════════════${NC}"
         
         echo -e "\n${BOLD}${GREEN}DRY RUN COMPLETE - No actions taken${NC}\n"
         
-        log "Dry run complete: ${#selected_stacks[@]} stacks would be backed up"
+        log "Dry run complete: $would_backup stacks would be backed up, $would_fail would fail"
         log "Estimated size: $total_size_human"
         
         return 0

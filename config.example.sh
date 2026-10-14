@@ -25,7 +25,11 @@ DOCKHAND_APPEND_HOSTNAME=true
 # Appdata bind-mount root
 APPDATA_PATH="/mnt/datastor/appdata"
 
-# Backup destination (local path, NFS, SMB mount)
+# Backup destination (local path, NFS, SMB mount). The one key for where backups live:
+# the backup writes here, and docker-stack-restore.sh / backup-verify.sh read here.
+# BACKUP_BASE, if set, overrides it for those read-side tools only (e.g. to inspect
+# another share). cleanup-old-backups.sh takes its path as $1, else BACKUP_BASE, else
+# BACKUP_DEST from the environment.
 BACKUP_DEST="/mnt/backup/docker-backups"
 
 # Compression: none | gzip | bzip2 | xz | zstd

@@ -1,5 +1,90 @@
 # Changelog
 
+## [0.5.2] — 2026-10-14
+
+The tools around the backup now work on a real share: restore, verify and the manual
+script. The restore wizard's last two steps are tested for the first time.
+
+### Fixed
+
+- **A successful restore no longer exits 1** (#1098). `perform_restore` set
+  `trap 'rm -rf "$temp_restore"' RETURN` and never disarmed it. After the restore had
+  finished and logged "Restore completed successfully", the trap fired again when `main`
+  returned. `$temp_restore` was out of scope by then, so `set -u` aborted with
+  `temp_restore: unbound variable` and exit 1. The trap now disarms itself, as
+  `backup_stack`'s has done since PR #11.
+- **`backup-verify.sh --stats` works on large shares** (#1099). It took oldest/newest
+  with `find … | sort | head -1` under `pipefail`. Once the listing outgrew the 64 KiB
+  pipe buffer, `sort` died of SIGPIPE and the script exited 141. That happens on every
+  forge run: about 930 archives, 96 KB of listing. One `find | awk` pass now gives the
+  count, oldest and newest.
+- **Restore and verify read `BACKUP_DEST`** (#1091). They read only `BACKUP_BASE`,
+  defaulting to `/mnt/backup/docker-backups`, so with a config that set `BACKUP_DEST` (as
+  `config.example.sh` does) they looked somewhere the backup never wrote. `BACKUP_BASE`
+  still overrides. `cleanup-old-backups.sh` falls back to `BACKUP_DEST` from the
+  environment after `$1` and `BACKUP_BASE`.
+- **Restore puts back the compose file the stack actually uses.** The backup archives
+  whichever of `compose.yaml`, `compose.yml`, `docker-compose.yaml` or
+  `docker-compose.yml` it finds. Restore copied back only `docker-compose.yml`, so a stack
+  using any other name came back with its old compose file, or with none if the stack dir
+  was gone. When the archive has a compose file, any other compose name in the stack dir
+  is removed first, so a leftover `compose.yaml` cannot shadow a restored
+  `docker-compose.yml`. The safety copy keeps the old file.
+- **The manual script handles appdata it can't fully read** (#1092). `du -sb | cut` under
+  `pipefail` exited 1 at the summary step for any root-owned appdata. This broke the
+  unprivileged elevated path it exists for. The size is now an estimate, labelled
+  "(estimate — unreadable paths excluded)". A new lib helper, `du_size`, never aborts
+  its caller. Restore, verify and the main script's dry run use it too.
+- **The manual script shows "state unknown", never "stopped", when it can't tell**
+  (#1090 R2-01). Its stack list, summary and dry run now use `get_running_services()`.
+  A stack whose compose file fails to parse used to show as "stopped", even though the
+  backup fails such a stack. Its dry run now counts these stacks as "Would fail", leaving
+  them out of "Would backup" and the size estimate.
+- **No literal `\033[…m` in dry runs** (#1093). Dry-run lines used `echo` without `-e`.
+- **No colour codes in `LOG_FILE`.** `log_error`, `log_success` and `log_warning` tee'd the
+  coloured line into the log. The terminal still gets colour; the log gets
+  `[ERROR] …`, `[SUCCESS] …` and `[WARNING] …`. `log()`'s timestamp format is unchanged.
+- **Restore Step 4 reads the archive once** (#1095). A single `tar -tvf | awk` pass prints
+  the first 20 entries and also counts entries and sums member sizes. A `tar` failure
+  still warns that the archive may be corrupt.
+- Every script with a shebang is tracked 100755: `docker-stack-backup.sh`,
+  `docker-stack-backup-manual.sh`, `cleanup-old-backups.sh`, `lib.sh`,
+  `config.example.sh` (#1093).
+
+### Changed — restore Step 6
+
+- **Space check before anything is written.** The extract (under `TMPDIR`) and, with
+  option 2, the safety copy (under `RESTORE_SAFETY_DIR`) must both fit. The two sizes
+  are summed when they share a filesystem. A `RESTORE_SAFETY_DIR` that doesn't exist yet
+  is measured on its nearest existing parent. The extract size is the member-size sum
+  from Step 4. If they don't fit, the wizard stops and names both variables.
+- **The archive is extracted before the stack is stopped.** A corrupt archive now costs
+  no downtime and changes nothing. The safety copy is taken after `compose down`, so it is
+  a consistent copy of stopped data. `down`/`up` semantics are unchanged.
+- **The safety copy goes in a fresh 0700 `mktemp -d` dir** under
+  `${RESTORE_SAFETY_DIR:-${TMPDIR:-/tmp}}`, named `docker-restore-backup-<stack>-<ts>.XXXXXX`.
+  It replaces a predictable path in `/tmp`. The path is printed when the restore ends.
+- An archive with no `<stack>/` appdata dir no longer deletes the live appdata.
+- If `compose up -d` fails, the wizard prints the manual start command and exits
+  non-zero. If a step fails after `down`, it says where things stand and where the
+  safety copy is.
+
+### Tests
+
+- `tests/restore-step6.bats` drives Steps 5-6 to completion against a stub `docker`.
+  It checks: rc 0, appdata and compose/.env replaced, the safety copy holds the old data
+  (0700), `down` ran before the replace and `up -d` after it, the temp extract is gone, and
+  the log holds plain lines. Further cases: `up -d` fails; not enough space; a corrupt
+  archive (nothing stopped); an archive without appdata. The steps run inside a function,
+  as `main` does, so #1098 fails the CI-run test too. One test runs `main` end to end under
+  `unshare -r`; GitHub runners skip it.
+- `tests/backup-verify.bats`: `--stats` over 2000 archives (about 240 KB of listing), and
+  `BACKUP_DEST`-only configs for verify and restore.
+- `tests/output-hygiene.bats`: no `\033` in either dry run, a plain `LOG_FILE`, and every
+  shebang script 100755 in the index.
+- `tests/manual-backup.bats`: an unreadable appdata subdir; "state unknown".
+- `tests/restore-wizard.bats`: Step 4 calls `tar -t` once.
+
 ## [0.5.1] — 2026-10-13
 
 The restore wizard reaches its confirmation prompt. It never had before, on any host.

@@ -72,12 +72,19 @@ APPDATA_PATH="/mnt/datastor/appdata"
 BACKUP_DEST="/mnt/backup/docker-backups"
 ```
 
-**docker-stack-restore.sh:**
+**docker-stack-restore.sh** and **backup-verify.sh** read the same `BACKUP_DEST` the backup
+writes. Set `BACKUP_BASE` only to read a different share:
 ```bash
-BACKUP_BASE="/mnt/backup/docker-backups"
+BACKUP_DEST="/mnt/backup/docker-backups"   # or BACKUP_BASE=… to override for these tools
 DOCKHAND_BASE="/path/to/dockhand"
 APPDATA_PATH="/mnt/datastor/appdata"
 ```
+
+Restore stages the extracted archive under `TMPDIR` (default `/tmp`). With option 2 in
+Step 5, it also writes a pre-restore copy of the old stack dir and appdata under
+`RESTORE_SAFETY_DIR` (default `TMPDIR`). Before Step 6 changes anything, it checks that
+both fit and stops with a message naming these variables if they don't. On a host with a
+small `/tmp`, run it as `sudo TMPDIR=/srv/scratch ./docker-stack-restore.sh`.
 
 ### Backup Destination Setup
 
@@ -256,15 +263,26 @@ Select option [3]: 2
 ```
 
 **Step 6: Restore**
+
+The archive is extracted while the stack is still running, so a corrupt archive or a full
+disk causes no downtime. Then the stack is stopped, the safety copy is taken (option 2),
+and the files are replaced:
 ```
-Creating safety backup in /tmp/docker-restore-backup-...
+Extracting backup...
 Stopping existing stack
-Restoring files...
+Creating safety backup in /tmp/docker-restore-backup-plex-20261014_101500.Ab12Cd
+✓ Safety backup created
+Restoring stack configuration...
+Restoring appdata...
 ✓ Files restored successfully
 
 Start the stack now? [y/N]: y
 ✓ Stack started successfully
+...
+Pre-restore copy of the old data: /tmp/docker-restore-backup-plex-20261014_101500.Ab12Cd
 ```
+If `docker compose up -d` fails, the wizard prints the command to start the stack by hand
+and exits non-zero. The restored files stay in place.
 
 ---
 

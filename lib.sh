@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.5.1"
+DSB_VERSION="0.5.2"
 
 #######################################
 # OS Detection
@@ -67,16 +67,29 @@ log() {
     echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "${LOG_FILE:-/dev/stderr}"
 }
 
+# Coloured line on the terminal, plain line in LOG_FILE: tee-ing the coloured line put
+# raw escape codes into every log reader's input. With no LOG_FILE, the coloured line
+# goes to stdout and stderr, as before.
+_log_tagged() {
+    local color="$1" tag="$2"; shift 2
+    if [[ -z "${LOG_FILE:-}" ]]; then
+        echo -e "${color}${tag}${NC} $*" | tee -a /dev/stderr
+        return
+    fi
+    echo -e "${color}${tag}${NC} $*"
+    echo -e "${tag} $*" >> "$LOG_FILE"
+}
+
 log_error() {
-    echo -e "${RED}[ERROR]${NC} $*" | tee -a "${LOG_FILE:-/dev/stderr}"
+    _log_tagged "$RED" "[ERROR]" "$@"
 }
 
 log_success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $*" | tee -a "${LOG_FILE:-/dev/stderr}"
+    _log_tagged "$GREEN" "[SUCCESS]" "$@"
 }
 
 log_warning() {
-    echo -e "${YELLOW}[WARNING]${NC} $*" | tee -a "${LOG_FILE:-/dev/stderr}"
+    _log_tagged "$YELLOW" "[WARNING]" "$@"
 }
 
 #######################################
@@ -860,6 +873,24 @@ required_free_bytes() {
     else
         echo "$min_bytes"
     fi
+}
+
+#######################################
+# du_size <path> [-h]
+# Prints the size of <path> in bytes (or human-readable with -h), and never aborts the
+# caller: `$(du -sb … | cut -f1)` under pipefail killed the script whenever du met a
+# path it could not read, i.e. on every root-owned appdata dir when run as a user (#1092).
+# du still prints a total in that case. Returns 1 when that total excludes unreadable
+# paths (an estimate), 0 when it is complete. Prints 0 if du printed nothing.
+#######################################
+du_size() {
+    local flag="-sb"
+    [[ "${2:-}" == -h ]] && flag="-sh"
+    local out rc=0
+    out=$(du "$flag" -- "$1" 2>/dev/null) || rc=$?
+    out="${out%%[[:space:]]*}"
+    echo "${out:-0}"
+    [[ $rc -eq 0 ]]
 }
 
 #######################################

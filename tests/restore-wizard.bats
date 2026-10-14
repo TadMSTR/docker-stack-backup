@@ -119,3 +119,19 @@ _drive_steps() {
     [ "$status" -eq 0 ]
     [[ "$output" != *"Could not list"* ]]
 }
+
+@test "Step 4 reads the archive once (#1095)" {
+    # tar wrapper on PATH: counts listing passes, then runs the real tar.
+    local real_tar; real_tar=$(command -v tar)
+    mkdir -p "$TEST_DIR/bin"
+    cat > "$TEST_DIR/bin/tar" <<STUB
+#!/usr/bin/env bash
+[[ "\$1" == -t* ]] && echo "\$1" >> "$TEST_DIR/tar-calls"
+exec "$real_tar" "\$@"
+STUB
+    chmod +x "$TEST_DIR/bin/tar"
+    PATH="$TEST_DIR/bin:$PATH" _drive_steps $'1\n1\n1\nn'
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"more files"* ]]
+    [ "$(wc -l < "$TEST_DIR/tar-calls")" -eq 1 ]
+}
