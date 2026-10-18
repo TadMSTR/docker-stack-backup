@@ -15,9 +15,13 @@ docker-stack-restore.sh        Restore a backup archive to a stack
 docker-stack-backup-manual.sh  Manual backup for a single named stack
 backup-verify.sh               Integrity verification for existing backup archives
 cleanup-old-backups.sh         Prune backups older than the configured retention window
+lib.sh                         Shared functions, sourced by every script; DSB_VERSION
+dsb_status.py                  Run status helper (python3 -I, stdlib only): status.json,
+                               .prom, coverage classifier, exemptions. See STATUS.md
 ```
 
-Reference docs: `USAGE.md`, `SAFETY_FEATURES.md`, `DRY_RUN.md`, `COMPRESSION.md`, `NOTIFICATIONS.md`, `OS_COMPATIBILITY.md`, `HOMELAB_SETUP.md`.
+Reference docs: `STATUS.md` (the status contract: its schema, reasons, classes and
+metrics are an interface; additive changes keep `schema: 1`), `USAGE.md`, `SAFETY_FEATURES.md`, `DRY_RUN.md`, `COMPRESSION.md`, `NOTIFICATIONS.md`, `OS_COMPATIBILITY.md`, `HOMELAB_SETUP.md`.
 
 ## When editing scripts
 

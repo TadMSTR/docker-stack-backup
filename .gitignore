@@ -1,5 +1,7 @@
 config.sh
+coverage-exemptions.conf
 .env
 *.env
 core.*
 *.core
+__pycache__/

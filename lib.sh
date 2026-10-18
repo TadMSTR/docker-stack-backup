@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.5.3"
+DSB_VERSION="0.6.0"
 
 #######################################
 # OS Detection
@@ -126,15 +126,22 @@ acquire_lock() {
     fi
 
     echo $$ >&$LOCK_FD
+    LOCK_HELD=true
     log "Lock acquired (PID: $$)"
 }
 
+# Only the process that holds the lock releases it. A run that found the lock held used
+# to `rm -f` the lock file on its way out: the running backup kept its flock on an inode
+# with no name, and a third run then created a new file, got the lock, and ran
+# alongside the first (vikunja#1158).
 release_lock() {
+    [[ "${LOCK_HELD:-false}" == true ]] || return 0
     if [[ -n "${LOCK_FD:-}" ]]; then
         flock -u $LOCK_FD 2>/dev/null || true
-        rm -f "${LOCK_FILE:-}" 2>/dev/null || true
-        log "Lock released"
     fi
+    rm -f "${LOCK_FILE:-}" 2>/dev/null || true
+    LOCK_HELD=false
+    log "Lock released"
 }
 
 #######################################
@@ -151,7 +158,16 @@ release_lock() {
 # The cross-check reads container labels only, so it does not depend on the compose
 # file parsing. Label filters with the same key are ANDed by docker, hence one query per
 # spelling of the path (as given, and symlink-resolved).
-# Requires: LOG_FILE (compose/docker stderr is appended there)
+# A third, path-independent query asks docker for running containers that bind-mount
+# $APPDATA_PATH/<stack> itself (docker matches a bind mount's source, or a mount
+# destination, against `--filter volume=`). It catches a stack started under a different
+# project name AND through a different path spelling, e.g. via a symlink: compose
+# stores the unresolved path in the label, so neither label query matches (#1090
+# R2-02). It misses containers that mount only subdirectories of the appdata dir. A hit
+# from another stack's container that binds this stack's appdata also returns 3: that
+# appdata is live, so archiving it "stopped" would not be consistent either.
+# Requires: LOG_FILE (compose/docker stderr is appended there); APPDATA_PATH for the
+# third query (skipped when unset)
 #######################################
 get_running_services() {
     local stack_path="$1"
@@ -171,6 +187,12 @@ get_running_services() {
             fi
             [[ "$resolved" == "$stack_path" ]] && break
         done
+        if [[ -n "${APPDATA_PATH:-}" ]]; then
+            live=$(docker ps -q --filter "volume=$APPDATA_PATH/$(basename "$stack_path")" --filter "status=running" 2>>"${LOG_FILE:-/dev/null}") || return 1
+            if [[ -n "$live" ]]; then
+                return 3
+            fi
+        fi
     fi
 
     printf '%s' "$out"
@@ -847,7 +869,8 @@ create_compressed_archive_elevated() {
 # SECURITY[deferred]: archives (and the .incomplete file) take the process umask, so on
 # the backup share they are world-readable (0664) although they hold full appdata. The
 # fix (umask 077) waits on a restore/verify read path that works when root is squashed
-# on an NFS destination. Target: docker-stack-backup-2026-10 p3/p5. Ticket #1089 (id 1172).
+# on an NFS destination. Target: docker-stack-backup-2026-10 p5 (moved from p3c by the
+# programme ledger: it needs the atlas export's root mapping). Ticket #1089 (id 1172).
 # Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-04).
 create_archive_atomic() {
     local final_file="$1"; shift
