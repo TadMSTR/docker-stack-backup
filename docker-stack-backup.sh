@@ -186,12 +186,22 @@ trap on_exit EXIT
 # bash released the lock and then carried on with the whole run, unlocked.)
 IN_STACK=false
 PENDING_SIGNAL=""
+CURRENT_STACK=""
+CURRENT_STACK_STARTED=""
 on_signal() {
     local code="$1"
     if [[ "$IN_STACK" == true && -z "$PENDING_SIGNAL" ]]; then
         PENDING_SIGNAL="$code"
         log_warning "Signal received: finishing the current stack (its services are started again), then stopping"
         return 0
+    fi
+    if [[ "$IN_STACK" == true ]]; then
+        # A second signal mid-stack: exit now, but name the stack whose services may be
+        # down, in the log and in the abort record (audit F-04).
+        log_error "Second signal: exiting during $CURRENT_STACK; its services may be stopped. Check: cd $(dockhand_stack_base)/$CURRENT_STACK && docker compose ps"
+        record_stack "$CURRENT_STACK" failed interrupted "" "" "" \
+            "$CURRENT_STACK_STARTED" "$(date +%s)" ""
+        IN_STACK=false
     fi
     exit "$code"
 }
@@ -401,13 +411,21 @@ write_run_status() {
 # The normal end of a real run. Preflight has passed, so the share is mounted and the
 # host dir may be created (a run that archived nothing never made it). The abort path
 # never creates it: an unmounted share must not get a local stand-in.
+# STATUS_DONE is set only once the write has returned: a signal that kills the finalize
+# step leaves STATUS_DONE false, so on_exit still writes the abort record and pings /fail
+# (audit F-04). A write that fails is done too: on_exit must not write a second record.
 finalize_run_status() {
-    STATUS_DONE=true
-    [[ "$STATUS_ARMED" == true ]] || return 0
+    if [[ "$STATUS_ARMED" != true ]]; then
+        STATUS_DONE=true
+        return 0
+    fi
     if [[ "$STATUS_ENABLED" == true ]]; then
         mkdir -p -- "$(dirname -- "$STATUS_FILE")" 2>/dev/null || true
     fi
-    write_run_status ""
+    local rc=0
+    write_run_status "" || rc=$?
+    STATUS_DONE=true
+    return "$rc"
 }
 
 # send_ping start|success|fail — Healthchecks-style liveness ping, if PING_URL is set.
@@ -919,6 +937,8 @@ main() {
         local result=0
         local stack_name; stack_name=$(basename "$stack_path")
         local stack_started; stack_started=$(date +%s)
+        CURRENT_STACK="$stack_name"
+        CURRENT_STACK_STARTED="$stack_started"
         IN_STACK=true
         backup_stack "$stack_path" || result=$?
         IN_STACK=false

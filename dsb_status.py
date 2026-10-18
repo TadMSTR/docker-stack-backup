@@ -36,7 +36,7 @@ RESULTS = ("backed_up", "skipped", "failed")
 REASONS = (
     "no-compose-file", "no-appdata-reference", "appdata-missing", "appdata-empty",
     "not-running", "compose-ps-failed", "running-state-mismatch", "stop-failed",
-    "archive-failed", "restart-failed",
+    "archive-failed", "restart-failed", "interrupted",
 )
 MODES = ("running", "stopped")
 OUTCOMES = ("success", "partial", "failed", "aborted")
@@ -44,7 +44,8 @@ ABORT_REASONS = (
     "not-privileged", "invalid-config", "lock-held", "preflight-failed", "interrupted",
 )
 CLASSES = (
-    "archived", "other-stack-appdata", "stack-dir", "system", "input-ro", "uncovered",
+    "archived", "other-stack-appdata", "stack-dir", "stack-dir-rw", "system", "input-ro",
+    "uncovered",
     "named-volume", "tmpfs", "other",
 )
 SYSTEM_PATHS = (
@@ -331,7 +332,10 @@ def classify_mount(m, ctx):
             return item
     for root in ctx["stack_roots"]:
         if under(src, root):
-            item["class"] = "stack-dir"
+            # The archive takes only the compose file and .env from the stack dir. A
+            # read-only bind there is config (git's job); a writable one is state the
+            # container writes (./pgdata), which is in no backup (audit F-01).
+            item["class"] = "stack-dir" if ro else "stack-dir-rw"
             return item
     for root in ctx["system_paths"]:
         if under(src, root):
@@ -368,7 +372,7 @@ def classify_stack(stack_base, name, appdata_roots, system_paths, backed_up, kno
             item = classify_mount(m, ctx)
             item["service"] = clean(svc)
             cls = item["class"]
-            if cls in ("uncovered", "named-volume"):
+            if cls in ("uncovered", "named-volume", "stack-dir-rw"):
                 item["alerting"] = True
             elif cls == "other-stack-appdata":
                 other = item["other_stack"]
@@ -513,6 +517,20 @@ def load_previous(path, host, now):
     reaches anything but an integer range check."""
     if not path:
         return None, {}
+    # Type check BEFORE open: open() on a device node runs the driver's open handler
+    # (tape rewind, watchdog arming) before fstat could refuse it, and an NFS share
+    # mounted without nodev resolves device nodes locally (audit F-02). Then fstat must
+    # name the same inode, so a swap between lstat and open is refused too.
+    try:
+        lst = os.lstat(path)
+    except FileNotFoundError:
+        return None, {}
+    except OSError as e:
+        diag("previous status file ignored: cannot stat (%s)" % e.strerror)
+        return None, {}
+    if not stat.S_ISREG(lst.st_mode):
+        diag("previous status file ignored: not a regular file")
+        return None, {}
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -522,8 +540,8 @@ def load_previous(path, host, now):
         return None, {}
     try:
         st = os.fstat(fd)
-        if not stat.S_ISREG(st.st_mode):
-            diag("previous status file ignored: not a regular file")
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (lst.st_dev, lst.st_ino):
+            diag("previous status file ignored: not a regular file, or replaced while opening")
             return None, {}
         if st.st_size > PREV_MAX_BYTES:
             diag("previous status file ignored: larger than %d bytes" % PREV_MAX_BYTES)
@@ -576,6 +594,11 @@ def load_previous(path, host, now):
 #######################################
 # Writing
 #######################################
+# SECURITY[accepted]: O_NOFOLLOW covers the temp name only. A share writer who makes a
+# directory above it a symlink (e.g. $BACKUP_DEST/$HOSTNAME) redirects this write, with a
+# fixed name and non-secret content, into another directory. The archives, `mkdir -p`
+# and the .incomplete files trust the same components; whoever can write the share is as
+# trusted as root (USAGE.md, #1100). Audit: 2026-10-18/docker-stack-backup-2026-10-p3c-status-contract (F-05).
 def atomic_write(path, tmp, data):
     """Write tmp in the same dir, then rename. O_EXCL|O_NOFOLLOW: a file or symlink
     planted at the temp name is never followed or reused. That covers the last path

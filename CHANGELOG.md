@@ -29,6 +29,16 @@ source for #494's coverage dashboard and alerts. See [STATUS.md](STATUS.md).
   node_exporter textfile format. Labels are stack names and fixed enums only.
 - **Liveness ping** (`PING_URL`, off by default): `/start`, success, `/fail`, in the
   Healthchecks.io scheme. The URL goes to curl via `-K`, never argv, and is never logged.
+- **Writable binds inside the stack dir alert** (class `stack-dir-rw`, audit p3c F-01). The
+  archive takes only the compose file and `.env` from the stack dir, so `./pgdata:/var/lib/…`
+  was in no backup while coverage said "ok". Read-only stack-dir binds stay `stack-dir`.
+- The carry-forward reader checks the file type with `lstat` **before** opening it, and
+  requires the opened file to be the same inode (audit F-02): `open()` on a device node
+  planted on a share mounted without `nodev` runs the driver's open handler.
+- **The manual script handles INT/TERM like the main script** (audit F-03): it finishes the
+  stack in flight and stops, instead of releasing the lock and carrying on unlocked.
+- A second signal mid-stack records that stack as `failed` / `interrupted`; a signal during
+  the final status step still leaves an abort record and a `/fail` ping (audit F-04).
 - An `APPDATA_PATH` that cannot be listed makes coverage `unknown`
   (`dsb_unowned_appdata_unknown 1`), never an empty "ok". A run whose status could not be
   written pings `/fail`, not success.

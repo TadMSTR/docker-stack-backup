@@ -28,6 +28,9 @@ so a test run or a one-stack manual backup never replaces the nightly's record. 
 a run that finds the lock held**: the status files and the ping belong to the lock
 holder, so a second invocation during the nightly logs that and leaves them alone (an
 abort before the lock step takes the lock just to write its record, if it is free).
+This relies on every run resolving the **same `LOCK_FILE`**. The default depends on
+whether the user can write `/var/run`, so if the script may be run by more than one user,
+set `LOCK_FILE` explicitly in `config.sh`.
 
 `status.json` is a **regular file**, never a directory. `docker-stack-restore.sh`,
 `backup-verify.sh` and `cleanup-old-backups.sh` enumerate directories under the host dir
@@ -91,7 +94,7 @@ removes or changes the meaning of a field bumps it.
 | Field | Meaning |
 |---|---|
 | `outcome` | `success`: no stack failed. `partial`: some failed, some backed up. `failed`: none backed up and at least one failed. `aborted`: the loop never ran, or did not finish. A run that finds no stacks is `success` with zero counts; alert on `counts.found`, not on the outcome. |
-| `abort_reason` | `not-privileged`, `invalid-config` (a numeric setting did not parse), `preflight-failed`, `interrupted` (INT/TERM, or an unexpected exit mid-run). `null` unless aborted. A signal during a stack lets that stack finish (its services are started again) and stops the loop after it; the stacks done so far are in `stacks`. `lock-held` is reserved: such a run writes nothing. |
+| `abort_reason` | `not-privileged`, `invalid-config` (a numeric setting did not parse), `preflight-failed`, `interrupted` (INT/TERM, or an unexpected exit mid-run, including during the final status step). `null` unless aborted. A signal during a stack lets that stack finish (its services are started again) and stops the loop after it; the stacks done so far are in `stacks`. A second signal exits at once, and the stack it interrupted is recorded as `failed` / `interrupted` (its services may be stopped). `lock-held` is reserved: such a run writes nothing. |
 | `last_success` | `finished` of the last `success` run, carried forward otherwise. `null` = never (that this file knows of). |
 | `stack_last_success` | per stack, the `finished` of its last `backed_up`, carried forward. In a completed run it lists only the stacks found this run (a removed stack drops out); an aborted run keeps the previous map whole. |
 | `stacks[].result` / `reason` | see [USAGE.md, "Stack results and reasons"](USAGE.md#stack-results-and-reasons). |
@@ -119,8 +122,9 @@ names `APPDATA_PATH`" (`stack_has_appdata`), unchanged.
 |---|---|---|
 | `archived` | bind source is `$APPDATA_PATH/<stack>` or below | no |
 | `other-stack-appdata` | bind source under `$APPDATA_PATH/<other>`; `other_stack` names it, `other_backed_up` says whether it was backed up this run | only if `<other>` was not backed up |
-| `stack-dir` | bind source inside the stack dir. The archive takes only the compose file and `.env`; the rest is git territory | no |
-| `system` | `/var/run`, `/run`, `/proc`, `/sys`, `/dev`, `/etc/localtime`, `/etc/timezone`, `/lib/modules`, plus `COVERAGE_IGNORE_PATHS` | no |
+| `stack-dir` | **read-only** bind source inside the stack dir: config, which is git's job (the archive takes only the compose file and `.env` from there) | no |
+| `stack-dir-rw` | **writable** bind source inside the stack dir (e.g. `./pgdata:/var/lib/postgresql/data`): state the container writes, usually git-ignored, and in no backup | **yes** |
+| `system` | `/var/run`, `/run`, `/proc`, `/sys`, `/dev`, `/etc/localtime`, `/etc/timezone`, `/lib/modules`, plus `COVERAGE_IGNORE_PATHS`, read-only or not. These are sockets, tmpfs, devices and host clock/kernel files, not state worth archiving. Anything else you put under them is not reported either; keep stack state out of `/run` | no |
 | `input-ro` | any other host bind with `read_only: true` | no |
 | `uncovered` | any other **writable** host bind | **yes** |
 | `named-volume` | `type: volume`, named or anonymous (`volume_name` = the docker name if compose sets one) | **yes** |

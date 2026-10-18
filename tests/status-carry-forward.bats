@@ -180,6 +180,26 @@ _assert_rejected() {
     [ "$(js "$STATUS" 'd["last_success"]')" = null ]
 }
 
+@test "the type check runs BEFORE open: a non-regular file is never opened (audit F-02)" {
+    # A device node cannot be made unprivileged; a FIFO takes the same path. The reader
+    # must refuse it from lstat alone, without calling os.open on it.
+    mkfifo "$TEST_DIR/fifo"
+    run python3 -I - "$BATS_TEST_DIRNAME/.." "$TEST_DIR/fifo" <<'PY'
+import os, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import dsb_status
+opened = []
+real = os.open
+os.open = lambda p, *a, **k: (opened.append(p), real(p, *a, **k))[1]
+print(dsb_status.load_previous(sys.argv[2], "h", 2000000000))
+assert opened == [], opened
+PY
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"(None, {})"* ]]
+    [[ "$output" == *"not a regular file"* ]]
+}
+
 @test "probe: a file written for another host is not carried" {
     _prev "$GOOD" 'd["host"] = "someone-else"'
     _real

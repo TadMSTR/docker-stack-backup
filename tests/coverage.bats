@@ -21,6 +21,7 @@ setup() {
     {"type": "bind", "source": "$APPDATA_PATH/$STACK/sub/../db", "target": "/db"},
     {"type": "bind", "source": "$APPDATA_PATH/other/logs", "target": "/logs", "read_only": true},
     {"type": "bind", "source": "$ST/config.yml", "target": "/etc/app.yml", "read_only": true},
+    {"type": "bind", "source": "$ST/pgdata", "target": "/var/lib/postgresql/data"},
     {"type": "bind", "source": "/var/run/docker.sock", "target": "/var/run/docker.sock"},
     {"type": "bind", "source": "/etc/localtime", "target": "/etc/localtime", "read_only": true},
     {"type": "bind", "source": "$TEST_DIR/host-ro", "target": "/in", "read_only": true},
@@ -48,18 +49,27 @@ _classes() { js "$R" '[i["class"] for i in d["stacks"][0]["coverage"]["items"]]'
 
 @test "every mount gets a class (report mode)" {
     _report
-    [ "$(_classes)" = '["archived", "archived", "other-stack-appdata", "stack-dir", "system", "system", "input-ro", "uncovered", "named-volume", "named-volume", "tmpfs"]' ]
+    [ "$(_classes)" = '["archived", "archived", "other-stack-appdata", "stack-dir", "stack-dir-rw", "system", "system", "input-ro", "uncovered", "named-volume", "named-volume", "tmpfs"]' ]
     [ "$(js "$R" 'd["stacks"][0]["coverage"]["status"]')" = '"uncovered"' ]
     # Paths are normalised without touching the filesystem.
     [ "$(js "$R" 'd["stacks"][0]["coverage"]["items"][1]["source"]')" = "\"$APPDATA_PATH/$STACK/db\"" ]
     [ "$(js "$R" 'd["stacks"][0]["coverage"]["items"][2]["other_stack"]')" = '"other"' ]
-    [ "$(js "$R" 'd["stacks"][0]["coverage"]["items"][8]["volume_name"]')" = '"stubstack_pgdata"' ]
+    [ "$(js "$R" 'd["stacks"][0]["coverage"]["items"][9]["volume_name"]')" = '"stubstack_pgdata"' ]
 }
 
 @test "alerting: uncovered and named volumes; other-stack-appdata only if <other> is not a stack" {
     _report
-    [ "$(js "$R" '[i["class"] for i in d["stacks"][0]["coverage"]["items"] if i["alerting"]]')" = '["other-stack-appdata", "uncovered", "named-volume", "named-volume"]' ]
-    [ "$(js "$R" 'd["summary"]["uncovered_items"]')" = 4 ]
+    [ "$(js "$R" '[i["class"] for i in d["stacks"][0]["coverage"]["items"] if i["alerting"]]')" = '["other-stack-appdata", "stack-dir-rw", "uncovered", "named-volume", "named-volume"]' ]
+    [ "$(js "$R" 'd["summary"]["uncovered_items"]')" = 5 ]
+}
+
+@test "a writable bind inside the stack dir (./pgdata) alerts; a read-only one does not (audit F-01)" {
+    _report
+    [ "$(js "$R" '[(i["class"], i["rw"], i["alerting"]) for i in d["stacks"][0]["coverage"]["items"] if (i["source"] or "").startswith("'"$ST"'/")]')" = '[["stack-dir", false, false], ["stack-dir-rw", true, true]]' ]
+    [ "$(js "$R" 'd["stacks"][0]["coverage"]["status"]')" = '"uncovered"' ]
+    echo "mount|$STACK:$ST/pgdata|dumped nightly" > "$COVERAGE_EXEMPTIONS_FILE"
+    _report
+    [ "$(js "$R" '[i["exempt"] for i in d["stacks"][0]["coverage"]["items"] if i["class"] == "stack-dir-rw"]')" = '["dumped nightly"]' ]
 }
 
 @test "unowned appdata: dirs that match no stack, with size; files and symlinks are skipped" {
@@ -94,7 +104,7 @@ _classes() { js "$R" '[i["class"] for i in d["stacks"][0]["coverage"]["items"]]'
 @test "COVERAGE_IGNORE_PATHS adds system prefixes" {
     export COVERAGE_IGNORE_PATHS="/nonexistent:$TEST_DIR/host-rw"
     _report
-    [ "$(js "$R" 'd["stacks"][0]["coverage"]["items"][7]["class"]')" = '"system"' ]
+    [ "$(js "$R" 'd["stacks"][0]["coverage"]["items"][8]["class"]')" = '"system"' ]
 }
 
 @test "real run: other-stack-appdata is alerting only when <other> was not backed up this run" {

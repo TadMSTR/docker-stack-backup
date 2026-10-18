@@ -116,7 +116,25 @@ fi
 mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 # shellcheck disable=SC2034
 LOCK_FD=200
-trap release_lock EXIT INT TERM
+trap release_lock EXIT
+
+# INT/TERM (audit p3c F-03; same as docker-stack-backup.sh). `trap release_lock INT
+# TERM` released the lock and then carried on backing up, unlocked. Outside a stack,
+# exit now (release_lock runs from the EXIT trap). During a stack its services may be
+# stopped, so the stack finishes its stop/archive/start and the run stops before the
+# next one. A second signal exits at once.
+IN_STACK=false
+PENDING_SIGNAL=""
+on_signal() {
+    if [[ "$IN_STACK" == true && -z "$PENDING_SIGNAL" ]]; then
+        PENDING_SIGNAL="$1"
+        log_warning "Signal received: finishing the current stack (its services are started again), then stopping"
+        return 0
+    fi
+    exit "$1"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 
 print_header() {
@@ -683,7 +701,9 @@ perform_backup() {
         echo -e "\n${BLUE}[${current}/${total}]${NC}"
         
         local rc=0
+        IN_STACK=true
         backup_stack "$stack_path" || rc=$?
+        IN_STACK=false
         if [[ $rc -eq 0 ]]; then
             successful=$((successful + 1))
         elif [[ $rc -eq 2 ]]; then
@@ -691,6 +711,10 @@ perform_backup() {
             skipped_entries+=("$(basename "$stack_path") (${STACK_SKIP_REASON:-unknown})")
         else
             failed=$((failed + 1))
+        fi
+        if [[ -n "$PENDING_SIGNAL" ]]; then
+            log_error "Stopping after $(basename "$stack_path") on a signal; the remaining selected stacks are not backed up"
+            exit "$PENDING_SIGNAL"
         fi
     done
     

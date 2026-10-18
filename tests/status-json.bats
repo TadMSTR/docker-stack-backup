@@ -317,6 +317,45 @@ _assert_aborted() {
     [ ! -e "$LOCK_FILE" ]
 }
 
+@test "a second signal mid-stack exits at once and names the in-flight stack in the record (audit F-04)" {
+    # The first signal is deferred at `stop`; the second arrives during `start`.
+    export STUB_SIGNAL_ON_STOP=INT STUB_SIGNAL_ON_START=TERM
+    run_backup
+    [ "$status" -eq 143 ]
+    [[ "$output" == *"Second signal: exiting during $STACK; its services may be stopped"* ]]
+    [ "$(js "$STATUS" 'd["outcome"]')" = '"aborted"' ]
+    [ "$(js "$STATUS" '[(s["name"], s["result"], s["reason"]) for s in d["stacks"]]')" = "[[\"$STACK\", \"failed\", \"interrupted\"]]" ]
+    [ ! -e "$LOCK_FILE" ]
+}
+
+@test "a signal during the finalize step still leaves an abort record and a /fail ping (audit F-04)" {
+    curl_stub
+    export PING_URL="https://hc.example/ping/k"
+    export STUB_SIGNAL_ON_CONFIG=TERM
+    run_backup
+    [ "$status" -eq 143 ]
+    [ "$(js "$STATUS" 'd["outcome"]')" = '"aborted"' ]
+    [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
+    [ "$(grep '^CONFIG: url' "$CURL_LOG" | tail -1)" = 'CONFIG: url = "https://hc.example/ping/k/fail"' ]
+}
+
+@test "manual script: TERM while a stack is stopped finishes that stack, stops, releases the lock (audit F-03)" {
+    add_stack second
+    export LOCK_FILE="$TEST_DIR/run/manual.lock"
+    export STUB_SIGNAL_ON_STOP=TERM
+    run bash -c "printf 'all\ny\n' | bash '$BATS_TEST_DIRNAME/../docker-stack-backup-manual.sh'"
+    echo "status=$status" >&2
+    [ "$status" -eq 143 ]
+    [[ "$output" == *"Signal received: finishing the current stack"* ]]
+    [[ "$output" == *"Stopping after "*" on a signal; the remaining selected stacks are not backed up"* ]]
+    # Exactly one of the two stacks was processed, and it was started again.
+    [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
+    grep -q '^compose start' "$DOCKER_LOG"
+    [ "$(find "$BACKUP_DEST" -name '*.tar' | wc -l)" -eq 1 ]
+    [[ "$output" == *"Lock released"* ]]
+    [ ! -e "$LOCK_FILE" ]
+}
+
 @test "TERM from a post-restart hook: same handler (interrupted, lock released)" {
     cat > "$TEST_DIR/killer" <<'EOF'
 #!/usr/bin/env bash

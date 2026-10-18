@@ -189,6 +189,7 @@ These values are a contract from 0.6.0 on: alerts and dashboards match on them.
 | failed | `stop-failed` | `docker compose stop` failed (what was running is started again) |
 | failed | `archive-failed` | the archive could not be written (what was running is started again) |
 | failed | `restart-failed` | archived, but the stack did not come back up (CRITICAL notification) |
+| failed | `interrupted` | a second INT/TERM arrived while this stack was being backed up; its services may be stopped |
 
 `no-compose-file` exists in the code but is never recorded: a dir without a compose file
 is not counted as a stack. The log and notification text keep their 0.5.x wording, so the
