@@ -384,3 +384,21 @@ EOF
     [ "${#lines[@]}" -eq 1 ]
     [[ "${lines[0]}" == *"trap on_exit EXIT"* ]]
 }
+
+@test "a second-signal exit leaves no stack temp dir (and no .env copy) behind, both scripts (audit R2-01)" {
+    echo "SECRET_TOKEN=s3cret" > "$DOCKHAND_BASE/$STACK/.env"
+    export TMPDIR="$TEST_DIR/tmp"; mkdir -p "$TMPDIR"
+    export STUB_SIGNAL_ON_STOP=INT STUB_SIGNAL_ON_START=TERM
+    run_backup
+    [ "$status" -eq 143 ]
+    [ -z "$(grep -rl s3cret "$TMPDIR" 2>/dev/null)" ]
+    [ -z "$(ls -A "$TMPDIR")" ]
+
+    rm -f "$DOCKER_LOG".signalled.*
+    printf 'app\nworker\n' > "$STATE_FILE"
+    export LOCK_FILE="$TEST_DIR/run/manual.lock"
+    run bash -c "printf '1\ny\n' | bash '$BATS_TEST_DIRNAME/../docker-stack-backup-manual.sh'"
+    [ "$status" -eq 143 ]
+    [ -z "$(grep -rl s3cret "$TMPDIR" 2>/dev/null)" ]
+    [ -z "$(ls -A "$TMPDIR")" ]
+}

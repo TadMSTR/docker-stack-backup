@@ -39,6 +39,8 @@ source for #494's coverage dashboard and alerts. See [STATUS.md](STATUS.md).
   stack in flight and stops, instead of releasing the lock and carrying on unlocked.
 - A second signal mid-stack records that stack as `failed` / `interrupted`; a signal during
   the final status step still leaves an abort record and a `/fail` ping (audit F-04).
+  An exit on a signal also removes the in-flight stack's temp dir, which holds a copy of
+  its `.env`; it used to be left in `$TMPDIR` (audit round 2, R2-01; both scripts).
 - An `APPDATA_PATH` that cannot be listed makes coverage `unknown`
   (`dsb_unowned_appdata_unknown 1`), never an empty "ok". A run whose status could not be
   written pings `/fail`, not success.

@@ -144,6 +144,7 @@ STATUS_DONE=false
 ABORT_REASON=""
 RUN_TMP=""
 RUN_STARTED=""
+STACK_TMP=""
 
 # The status files and the ping belong to whoever holds the run lock. An abort before
 # the lock was taken (not privileged, invalid config) takes it here just to write its
@@ -173,6 +174,9 @@ on_exit() {
     fi
     if [[ -n "$RUN_TMP" ]]; then
         rm -rf -- "$RUN_TMP" || true
+    fi
+    if [[ -n "${STACK_TMP:-}" ]]; then
+        rm -rf -- "$STACK_TMP" || true
     fi
     release_lock || true
     exit "$rc"
@@ -653,6 +657,10 @@ backup_stack() {
     
     # Create a temporary directory for organizing backup contents
     local temp_dir; temp_dir=$(mktemp -d)
+    # Also kept globally: an exit from a signal trap never returns from this function,
+    # so the RETURN trap below does not run, and the exit handler removes it instead.
+    # It holds a copy of the stack's .env (audit p3c R2-01).
+    STACK_TMP="$temp_dir"
     # Bash RETURN traps are global: an un-disarmed `trap ... RETURN` set here stays
     # armed after backup_stack() returns and then re-fires on every later function
     # return (e.g. main()), where $temp_dir is out of scope — aborting under `set -u`
@@ -660,7 +668,7 @@ backup_stack() {
     # successful backup (latent until a real elevated run first reached this point).
     # Disarm the trap as part of its own action so it fires exactly once, for this
     # function's return, and never leaks to outer frames.
-    trap 'rm -rf "$temp_dir"; trap - RETURN' RETURN
+    trap 'rm -rf "$temp_dir"; STACK_TMP=""; trap - RETURN' RETURN
     
     # Copy compose file to temp directory
     cp "$compose_file" "$temp_dir/"
