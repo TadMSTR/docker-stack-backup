@@ -145,16 +145,31 @@ ABORT_REASON=""
 RUN_TMP=""
 RUN_STARTED=""
 
+# The status files and the ping belong to whoever holds the run lock. An abort before
+# the lock was taken (not privileged, invalid config) takes it here just to write its
+# record; if another run holds it, that run's status and ping are left alone.
+lock_for_status() {
+    [[ "${LOCK_HELD:-false}" == true ]] && return 0
+    [[ -n "${LOCK_FILE:-}" ]] || return 1
+    local fd
+    exec {fd}>>"$LOCK_FILE" || return 1
+    flock -n "$fd" || return 1
+    LOCK_HELD=true
+}
+
 # One EXIT handler: write the abort status (if the run was armed and never finished),
 # then release the lock. A second `trap ... EXIT` would silently replace the first, so
-# everything that must happen at exit goes here. INT and TERM exit through it; with
-# `trap release_lock INT` bash ran the handler and then carried on with the run.
+# everything that must happen at exit goes here.
 on_exit() {
     local rc=$?
     trap - EXIT
     if [[ "$STATUS_ARMED" == true && "$STATUS_DONE" != true ]]; then
-        write_run_status "${ABORT_REASON:-interrupted}" || true
-        send_ping fail || true
+        if lock_for_status 2>/dev/null; then
+            write_run_status "${ABORT_REASON:-interrupted}" || true
+            send_ping fail || true
+        else
+            log_warning "Another run holds the lock: its status.json, .prom and ping are left alone"
+        fi
     fi
     if [[ -n "$RUN_TMP" ]]; then
         rm -rf -- "$RUN_TMP" || true
@@ -163,8 +178,25 @@ on_exit() {
     exit "$rc"
 }
 trap on_exit EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+
+# INT/TERM. Outside a stack, exit now (through on_exit). While a stack is being backed
+# up, its services may be stopped: exiting there would leave them down. So the signal is
+# noted, the stack runs to the end of its stop/archive/start, and the loop stops before
+# the next stack. A second signal exits at once. (With 0.5.x's `trap release_lock INT`
+# bash released the lock and then carried on with the whole run, unlocked.)
+IN_STACK=false
+PENDING_SIGNAL=""
+on_signal() {
+    local code="$1"
+    if [[ "$IN_STACK" == true && -z "$PENDING_SIGNAL" ]]; then
+        PENDING_SIGNAL="$code"
+        log_warning "Signal received: finishing the current stack (its services are started again), then stopping"
+        return 0
+    fi
+    exit "$code"
+}
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 
 
 check_docker_running() {
@@ -888,7 +920,9 @@ main() {
         local result=0
         local stack_name; stack_name=$(basename "$stack_path")
         local stack_started; stack_started=$(date +%s)
+        IN_STACK=true
         backup_stack "$stack_path" || result=$?
+        IN_STACK=false
         local stack_finished; stack_finished=$(date +%s)
         local rec_result=failed rec_reason="${STACK_FAIL_REASON:-${STACK_FAIL_POINT:-}}"
         if [[ $result -eq 0 ]]; then
@@ -899,6 +933,11 @@ main() {
         record_stack "$stack_name" "$rec_result" "$rec_reason" "${STACK_BACKUP_MODE:-}" \
             "${STACK_ARCHIVE:-}" "${STACK_ARCHIVE_BYTES:-}" "$stack_started" \
             "$stack_finished" "${STACK_DOWNTIME_S:-}"
+        if [[ -n "$PENDING_SIGNAL" ]]; then
+            log_error "Stopping after $stack_name on a signal; the remaining stacks are not backed up"
+            ABORT_REASON="interrupted"
+            exit "$PENDING_SIGNAL"
+        fi
         
         if [[ $result -eq 0 ]]; then
             # Successfully backed up

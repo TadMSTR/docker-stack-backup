@@ -230,15 +230,49 @@ _assert_aborted() {
     _assert_aborted invalid-config
 }
 
-@test "abort: lock held by another run; the lock is released and status says why" {
+@test "lock held by another run: its lock file, status.json and ping are left alone (CR-02, #1158)" {
     mkdir -p "$HOST_DIR" "$(dirname "$LOCK_FILE")"
+    echo '{"the running run": "wrote this"}' > "$STATUS"
+    cp "$STATUS" "$TEST_DIR/before.json"
+    curl_stub
+    export PING_URL="https://hc.example/ping/k"
+    exec 9>"$LOCK_FILE"
+    flock 9
+    run_backup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Another backup is already running"* ]]
+    [[ "$output" == *"Another run holds the lock: its status.json, .prom and ping are left alone"* ]]
+    [[ "$output" != *"Lock released"* ]]
+    # The holder's lock file still exists (it used to be deleted), so a third run is
+    # still refused.
+    [ -e "$LOCK_FILE" ]
+    run_backup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Another backup is already running"* ]]
+    exec 9>&-
+    cmp "$STATUS" "$TEST_DIR/before.json"
+    ! grep -q '^CONFIG: url' "$CURL_LOG"
+}
+
+@test "an abort before the lock does not touch status while another run holds the lock" {
+    mkdir -p "$HOST_DIR" "$(dirname "$LOCK_FILE")"
+    echo '{"the running run": "wrote this"}' > "$STATUS"
+    cp "$STATUS" "$TEST_DIR/before.json"
+    export MIN_FREE_GB=5G
     exec 9>"$LOCK_FILE"
     flock 9
     run_backup
     exec 9>&-
     [ "$status" -eq 1 ]
-    [[ "$output" == *"Another backup is already running"* ]]
-    _assert_aborted lock-held
+    cmp "$STATUS" "$TEST_DIR/before.json"
+    [ -e "$LOCK_FILE" ]
+}
+
+@test "release_lock only acts for the lock holder" {
+    run bash -c 'LOG_FILE=/dev/null; source "$1"; LOCK_FILE="$2"; LOCK_FD=200; : > "$LOCK_FILE"; release_lock; [ -e "$LOCK_FILE" ]' \
+        _ "$BATS_TEST_DIRNAME/../lib.sh" "$TEST_DIR/some.lock"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"Lock released"* ]]
 }
 
 @test "abort: preflight failed; the lock is released (lock file removed)" {
@@ -262,7 +296,28 @@ _assert_aborted() {
     [ "$(js "$STATUS" 'd["stack_last_success"]')" = "$prev_stack" ]
 }
 
-@test "abort: TERM mid-run exits through the same handler (interrupted, lock released)" {
+@test "TERM while a stack is stopped: that stack is started again, the loop stops, status says interrupted (CR-01)" {
+    add_stack second   # "second" sorts before "stubstack": it is the stack in flight
+    export STUB_SIGNAL_ON_STOP=TERM
+    run_backup
+    [ "$status" -eq 143 ]
+    [[ "$output" == *"Signal received: finishing the current stack"* ]]
+    [[ "$output" == *"Stopping after second on a signal"* ]]
+    # second was stopped, archived and started again; stubstack was never touched.
+    grep -q '^compose stop' "$DOCKER_LOG"
+    grep -q '^compose start' "$DOCKER_LOG"
+    [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
+    [ -s "$STATE_FILE" ]
+    [ -n "$(find "$BACKUP_DEST" -name 'second.tar')" ]
+    [ -z "$(find "$BACKUP_DEST" -name "$STACK.tar")" ]
+    [ "$(js "$STATUS" 'd["outcome"]')" = '"aborted"' ]
+    [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
+    [ "$(js "$STATUS" '[(s["name"], s["result"]) for s in d["stacks"]]')" = '[["second", "backed_up"]]' ]
+    [[ "$output" == *"Lock released"* ]]
+    [ ! -e "$LOCK_FILE" ]
+}
+
+@test "TERM from a post-restart hook: same handler (interrupted, lock released)" {
     cat > "$TEST_DIR/killer" <<'EOF'
 #!/usr/bin/env bash
 kill -TERM "$PPID"
@@ -276,7 +331,11 @@ EOF
     cp "$HOME/hooks.sh" "$TEST_DIR/config.sh"
     run bash "$TEST_DIR/docker-stack-backup.sh"
     [ "$status" -eq 143 ]
-    _assert_aborted interrupted
+    [ "$(js "$STATUS" 'd["outcome"]')" = '"aborted"' ]
+    [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
+    # The hook ran inside the stack, so the stack finished and was recorded.
+    [ "$(js "$STATUS" '[s["result"] for s in d["stacks"]]')" = '["backed_up"]' ]
+    [[ "$output" == *"Lock released"* ]]
     [[ "$output" != *"Backup Summary"* ]]
     [ ! -e "$LOCK_FILE" ]
 }

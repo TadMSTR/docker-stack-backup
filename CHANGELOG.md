@@ -43,9 +43,17 @@ source for #494's coverage dashboard and alerts. See [STATUS.md](STATUS.md).
   project name *and* through a symlinked path matched neither working-dir label query, so
   it would have been archived live as "(stopped)". A running container of another stack
   that binds this stack's appdata dir now also fails the stack (`running-state-mismatch`).
-- **INT and TERM now end the run.** The old `trap release_lock EXIT INT TERM` released the
-  lock on Ctrl-C and then carried on with the backup, unlocked. One EXIT handler now writes
-  the abort status and then releases the lock.
+- **INT and TERM now stop the run, safely.** The old `trap release_lock EXIT INT TERM`
+  released the lock on Ctrl-C and then carried on with the backup, unlocked. Now a signal
+  between stacks exits at once; a signal during a stack lets that stack finish its
+  stop/archive/start (so its services are not left down), then stops the loop
+  (`outcome: aborted`, `abort_reason: interrupted`). A second signal exits at once. One EXIT
+  handler writes the abort status and then releases the lock.
+- **Only the lock holder releases the lock** (vikunja#1158; also the manual script). A run
+  that found the lock held deleted the lock file on exit, so a third run could lock a new
+  file and run alongside the first. Such a run now also leaves the holder's status.json,
+  `.prom` and ping alone. `Lock released` is no longer logged by runs that never took the
+  lock (dry runs, `--help`).
 - The run's exit code is now set after the status is written: a status or `.prom` write
   failure exits 1, after the notifications have gone out.
 

@@ -126,15 +126,22 @@ acquire_lock() {
     fi
 
     echo $$ >&$LOCK_FD
+    LOCK_HELD=true
     log "Lock acquired (PID: $$)"
 }
 
+# Only the process that holds the lock releases it. A run that found the lock held used
+# to `rm -f` the lock file on its way out: the running backup kept its flock on an inode
+# with no name, and a third run then created a new file, got the lock, and ran
+# alongside the first (vikunja#1158).
 release_lock() {
+    [[ "${LOCK_HELD:-false}" == true ]] || return 0
     if [[ -n "${LOCK_FD:-}" ]]; then
         flock -u $LOCK_FD 2>/dev/null || true
-        rm -f "${LOCK_FILE:-}" 2>/dev/null || true
-        log "Lock released"
     fi
+    rm -f "${LOCK_FILE:-}" 2>/dev/null || true
+    LOCK_HELD=false
+    log "Lock released"
 }
 
 #######################################

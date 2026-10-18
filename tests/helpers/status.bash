@@ -6,6 +6,8 @@ js() {
     python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(eval(sys.argv[2])))' "$1" "$2"
 }
 
+# Sets HOST, HOST_DIR, STATUS for the .bats files that load this helper.
+# shellcheck disable=SC2034
 status_setup() {
     HOST="$(hostname)"
     HOST_DIR="$BACKUP_DEST/$HOST"

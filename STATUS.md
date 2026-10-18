@@ -19,12 +19,15 @@ take. Alerts, dashboards and the restore drill all read this one contract.
 
 | File | Written |
 |---|---|
-| `$BACKUP_DEST/$HOSTNAME/status.json` | end of every real run, and on every abort path |
+| `$BACKUP_DEST/$HOSTNAME/status.json` | end of every real run, and on every abort path, by the run that holds the lock |
 | `$BACKUP_DEST/$HOSTNAME/<run>/status.json` | same content, only if the run dir exists (something was archived); history for trends |
 | `$PROM_TEXTFILE_DIR/docker_stack_backup.prom` | same points as `status.json`, aborts included, if `PROM_TEXTFILE_DIR` is set |
 
 **A dry run, `--coverage-report` and `docker-stack-backup-manual.sh` write none of them**,
-so a test run or a one-stack manual backup never replaces the nightly's record.
+so a test run or a one-stack manual backup never replaces the nightly's record. **Nor does
+a run that finds the lock held**: the status files and the ping belong to the lock
+holder, so a second invocation during the nightly logs that and leaves them alone (an
+abort before the lock step takes the lock just to write its record, if it is free).
 
 `status.json` is a **regular file**, never a directory. `docker-stack-restore.sh`,
 `backup-verify.sh` and `cleanup-old-backups.sh` enumerate directories under the host dir
@@ -88,7 +91,7 @@ removes or changes the meaning of a field bumps it.
 | Field | Meaning |
 |---|---|
 | `outcome` | `success`: no stack failed. `partial`: some failed, some backed up. `failed`: none backed up and at least one failed. `aborted`: the loop never ran, or did not finish. A run that finds no stacks is `success` with zero counts; alert on `counts.found`, not on the outcome. |
-| `abort_reason` | `not-privileged`, `invalid-config` (a numeric setting did not parse), `lock-held` (another run holds the lock), `preflight-failed`, `interrupted` (INT/TERM, or an unexpected exit mid-run). `null` unless aborted. |
+| `abort_reason` | `not-privileged`, `invalid-config` (a numeric setting did not parse), `preflight-failed`, `interrupted` (INT/TERM, or an unexpected exit mid-run). `null` unless aborted. A signal during a stack lets that stack finish (its services are started again) and stops the loop after it; the stacks done so far are in `stacks`. `lock-held` is reserved: such a run writes nothing. |
 | `last_success` | `finished` of the last `success` run, carried forward otherwise. `null` = never (that this file knows of). |
 | `stack_last_success` | per stack, the `finished` of its last `backed_up`, carried forward. In a completed run it lists only the stacks found this run (a removed stack drops out); an aborted run keeps the previous map whole. |
 | `stacks[].result` / `reason` | see [USAGE.md, "Stack results and reasons"](USAGE.md#stack-results-and-reasons). |

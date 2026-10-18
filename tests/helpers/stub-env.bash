@@ -7,7 +7,9 @@
 #                --filter status=running` prints $STATE_FILE; `compose stop` empties
 #                it; `compose start <svcs>` / `compose up ... <svcs>` write <svcs> to it.
 #                STUB_START_RC makes `compose start` fail with that code (STUB_STOP_RC
-#                and STUB_UP_RC do the same for `stop` and `up`); STUB_PS_RC
+#                and STUB_UP_RC do the same for `stop` and `up`). STUB_SIGNAL_ON_STOP=TERM
+#                sends that signal to the running docker-stack-backup.sh on the first
+#                `compose stop` (an operator's Ctrl-C or a timeout wrapper); STUB_PS_RC
 #                makes `compose ps` fail (as a YAML error or unset ${VAR:?} does).
 #                Plain `docker ps` (the label cross-check) prints $STUB_LIVE; with a
 #                `volume=` filter it prints $STUB_LIVE_VOLUME instead. `compose config`
@@ -81,6 +83,16 @@ case "$1" in
         [[ -f "$f" ]] || { echo "stub: no config for $(basename "$PWD")" >&2; exit 1; }
         cat "$f" ;;
     stop)
+        if [[ -n "${STUB_SIGNAL_ON_STOP:-}" && ! -e "$DOCKER_LOG.signalled" ]]; then
+            : > "$DOCKER_LOG.signalled"
+            p=$PPID
+            while [[ "$p" -gt 1 ]]; do
+                if tr '\0' ' ' < "/proc/$p/cmdline" | grep -q 'docker-stack-backup\.sh'; then
+                    kill -"$STUB_SIGNAL_ON_STOP" "$p"; break
+                fi
+                p=$(awk '{print $4}' "/proc/$p/stat")
+            done
+        fi
         [[ "${STUB_STOP_RC:-0}" -ne 0 ]] && exit "$STUB_STOP_RC"
         : > "$STATE_FILE" ;;
     start)
