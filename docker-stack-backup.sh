@@ -739,8 +739,7 @@ main() {
     done
     
     if [[ "$coverage_report" == true ]]; then
-        # stdout is the JSON only: no lock was taken, so nothing is logged at exit.
-        LOCK_FD=""
+        # stdout is the JSON only: no lock is taken, so release_lock logs nothing at exit.
         run_coverage_report
         exit $?
     fi
