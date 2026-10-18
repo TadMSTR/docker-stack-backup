@@ -197,3 +197,28 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"Skipped stacks: $STACK (no-appdata-reference)"* ]]
 }
+
+@test "APPDATA_PATH that cannot be listed: unowned appdata is unknown, never an empty ok (OV-39)" {
+    if [[ $EUID -eq 0 ]]; then skip "root ignores the mode"; fi
+    echo "stack|$STACK|test" > "$COVERAGE_EXEMPTIONS_FILE"
+    sed -i 's|"source": "'"$TEST_DIR"'/host-rw"|"source": "'"$APPDATA_PATH/$STACK"'/rw"|' "$STUB_CONFIG_DIR/$STACK.json"
+    chmod 0300 "$APPDATA_PATH"     # traversable, not listable
+    _report
+    chmod 0755 "$APPDATA_PATH"
+    [ "$(js "$R" 'd["summary"]["status"]')" = '"unknown"' ]
+    [ "$(js "$R" 'd["summary"]["unowned_appdata_status"]')" = '"unknown"' ]
+    [[ "$(js "$R" 'd["summary"]["unowned_appdata_error"]')" == *"cannot list"*"Permission denied"* ]]
+    [ "$(js "$R" 'd["unowned_appdata"]')" = '[]' ]
+}
+
+@test "unlistable APPDATA_PATH in a real run: status unknown and dsb_unowned_appdata_unknown 1" {
+    if [[ $EUID -eq 0 ]]; then skip "root ignores the mode"; fi
+    export PROM_TEXTFILE_DIR="$TEST_DIR/textfile"; mkdir -p "$PROM_TEXTFILE_DIR"
+    chmod 0300 "$APPDATA_PATH"
+    run_backup
+    chmod 0755 "$APPDATA_PATH"
+    # (the stub's tar also trips on the mode, so the stack itself may fail; not the point)
+    [ "$(js "$STATUS" 'd["coverage"]["unowned_appdata_status"]')" = '"unknown"' ]
+    [ "$(js "$STATUS" 'd["coverage"]["status"]')" = '"unknown"' ]
+    grep -qx "dsb_unowned_appdata_unknown{host=\"$HOST\"} 1" "$PROM_TEXTFILE_DIR/docker_stack_backup.prom"
+}

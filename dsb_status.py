@@ -386,26 +386,31 @@ def classify_stack(stack_base, name, appdata_roots, system_paths, backed_up, kno
 
 
 def unowned_appdata(appdata, known_stacks):
-    """Every directory in APPDATA_PATH whose name matches no stack. Regular files and
-    symlinks are skipped (symlinks are not followed)."""
+    """(dirs, error). Every directory in APPDATA_PATH whose name matches no stack.
+    Regular files and symlinks are skipped (symlinks are not followed). If APPDATA_PATH
+    cannot be listed, error says why: an unreadable area is "unknown", never an empty
+    one. An entry that cannot be stat'ed is kept (with `error`), not dropped."""
     out = []
     try:
         entries = sorted(os.scandir(appdata), key=lambda e: e.name)
     except OSError as e:
-        diag("cannot list %s: %s" % (appdata, e.strerror))
-        return out
+        msg = "cannot list %s: %s" % (appdata, e.strerror)
+        diag(msg)
+        return out, printable(msg)
     for ent in entries:
+        if ent.name in known_stacks:
+            continue
         try:
             if not ent.is_dir(follow_symlinks=False):
                 continue
-        except OSError:
-            continue
-        if ent.name in known_stacks:
+        except OSError as e:
+            out.append({"dir": clean(ent.name), "bytes": None, "estimate": True,
+                        "exempt": None, "error": "cannot stat: %s" % e.strerror})
             continue
         nbytes, estimate = du_bytes(ent.path)
         out.append({"dir": clean(ent.name), "bytes": nbytes, "estimate": estimate,
                     "exempt": None})
-    return out
+    return out, None
 
 
 def du_bytes(path):
@@ -440,7 +445,7 @@ def coverage_for(names, stack_base, appdata, ignore_paths, exemptions_file, back
     for name in names:
         per_stack.append({"name": name, "coverage": classify_stack(
             stack_base, name, appdata_roots, system_paths, backed_up, known)})
-    unowned = unowned_appdata(appdata, known)
+    unowned, unowned_error = unowned_appdata(appdata, known)
     entries, ex_status, ex_errors = load_exemptions(exemptions_file)
     apply_exemptions(entries, per_stack, unowned)
     for st in per_stack:
@@ -454,6 +459,10 @@ def coverage_for(names, stack_base, appdata, ignore_paths, exemptions_file, back
              % (s["line"], s["kind"], s["subject"]))
     exemptions = {"file": clean(exemptions_file), "status": ex_status,
                   "errors": ex_errors, "stale": stale}
+    if unowned_error:
+        # Rides with the exemptions/summary so both callers carry it without a new
+        # return value; coverage_summary turns it into status "unknown".
+        exemptions["unowned_appdata_error"] = unowned_error
     return per_stack, unowned, exemptions
 
 
@@ -473,9 +482,10 @@ def coverage_summary(per_stack, unowned, exemptions):
             if i["alerting"] and i["exempt"] is None:
                 uncovered_items += 1
     unowned_unexempt = sum(1 for u in unowned if u["exempt"] is None)
+    unowned_error = exemptions.get("unowned_appdata_error")
     if exemptions["status"] == "config-error":
         status = "config-error"
-    elif stacks_unknown:
+    elif stacks_unknown or unowned_error:
         status = "unknown"
     elif uncovered_items or unowned_unexempt:
         status = "uncovered"
@@ -484,6 +494,8 @@ def coverage_summary(per_stack, unowned, exemptions):
     return {"status": status, "stacks_unknown": stacks_unknown,
             "stacks_uncovered": stacks_uncovered, "uncovered_items": uncovered_items,
             "unowned_appdata": len(unowned), "unowned_appdata_unexempt": unowned_unexempt,
+            "unowned_appdata_status": "unknown" if unowned_error else "ok",
+            "unowned_appdata_error": unowned_error,
             "by_class": dict(sorted(by_class.items()))}
 
 
@@ -565,9 +577,11 @@ def load_previous(path, host, now):
 # Writing
 #######################################
 def atomic_write(path, tmp, data):
-    """Write tmp in the same dir, then rename. O_EXCL|O_NOFOLLOW: a name planted on
-    the share is never followed. Mode 0644 whatever the umask: names, sizes, paths;
-    no secrets."""
+    """Write tmp in the same dir, then rename. O_EXCL|O_NOFOLLOW: a file or symlink
+    planted at the temp name is never followed or reused. That covers the last path
+    component only; the directories above it are trusted the same way the archives in
+    them are (whoever can write the share is as trusted as root: USAGE.md). Mode 0644
+    whatever the umask: names, sizes, paths; no secrets."""
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
     try:
         fd = os.open(tmp, flags, 0o644)
@@ -710,6 +724,10 @@ def build_prom(doc):
     p.add("dsb_unowned_appdata_dirs", "Appdata dirs that match no stack.", h, len(unowned))
     p.add("dsb_unowned_appdata_unexempt", "Unowned appdata dirs with no exemption.", h,
           sum(1 for u in unowned if u["exempt"] is None))
+    if doc.get("coverage") is not None:
+        p.add("dsb_unowned_appdata_unknown",
+              "1 if APPDATA_PATH could not be listed, so unowned appdata is unknown.", h,
+              1 if doc["coverage"].get("unowned_appdata_status") == "unknown" else 0)
     p.add("dsb_exemptions_stale", "Exemption entries that matched nothing.", h,
           len(ex.get("stale") or []))
     p.add("dsb_exemptions_config_error", "1 if the exemptions file has rejected lines.", h,

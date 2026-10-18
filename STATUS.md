@@ -101,7 +101,7 @@ removes or changes the meaning of a field bumps it.
 | `stacks[].coverage` | `status`: `ok`, `uncovered` (an alerting item without an exemption) or `unknown` (`docker compose config` failed; `error` has its first stderr line). `null` on an aborted run. |
 | `unowned_appdata` | every **directory** in `APPDATA_PATH` that matches no stack. Regular files and symlinks are skipped. `estimate: true` when `du` could not read everything (e.g. root-owned appdata, unprivileged run). `null` on an aborted run. |
 | `exemptions.status` | `ok`, `missing` (no file; no exemptions) or `config-error` (lines were rejected; `errors` lists them; the valid lines still apply). |
-| `coverage.status` | `config-error` > `unknown` > `uncovered` > `ok`, the worst that applies to the run. |
+| `coverage.status` | `config-error` > `unknown` > `uncovered` > `ok`, the worst that applies to the run. `unknown` also when `APPDATA_PATH` could not be listed: then `coverage.unowned_appdata_status` is `unknown` and `unowned_appdata_error` says why. An unreadable area is never reported as an empty one. |
 
 ## Coverage classes
 
@@ -218,6 +218,7 @@ maximum, last success takes the oldest.
 | `dsb_coverage_unknown` | `stack` | 1 if `docker compose config` failed |
 | `dsb_unowned_appdata_dirs` | | |
 | `dsb_unowned_appdata_unexempt` | | |
+| `dsb_unowned_appdata_unknown` | | 1 if `APPDATA_PATH` could not be listed |
 | `dsb_exemptions_stale` | | |
 | `dsb_exemptions_config_error` | | 1 if lines were rejected |
 
@@ -244,7 +245,7 @@ Prometheus is itself stopped for about 2.5 minutes inside the backup window).
 - alert: DockerStackBackupUncovered
   expr: >
     sum by (host) (dsb_coverage_uncovered) + sum by (host) (dsb_coverage_unknown)
-    + dsb_unowned_appdata_unexempt > 0
+    + dsb_unowned_appdata_unexempt + dsb_unowned_appdata_unknown > 0
   for: 1h
 ```
 
@@ -257,7 +258,7 @@ Healthchecks speaks too:
 |---|---|
 | before the backup loop | `$PING_URL/start` |
 | `success` | `$PING_URL` |
-| `partial`, `failed`, `aborted` | `$PING_URL/fail` |
+| `partial`, `failed`, `aborted`, or the status could not be written | `$PING_URL/fail` |
 
 curl gets 10 s and 2 retries, and a ping error is a warning, never a failed run. This
 gives a cron-liveness signal that does not depend on the metrics pipeline.

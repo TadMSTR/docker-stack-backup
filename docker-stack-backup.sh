@@ -1002,8 +1002,12 @@ main() {
     # Status after notifications: coverage runs here, once, after every stack is back up,
     # and a status write failure makes the run exit non-zero without holding back the
     # notifications.
-    finalize_run_status || rc=1
-    if [[ $failed -eq 0 ]]; then
+    local status_rc=0
+    finalize_run_status || status_rc=1
+    [[ $status_rc -ne 0 ]] && rc=1
+    # A run whose status could not be written is not reported healthy: the record the
+    # alerts read is now stale.
+    if [[ $failed -eq 0 && $status_rc -eq 0 ]]; then
         send_ping success
     else
         send_ping fail

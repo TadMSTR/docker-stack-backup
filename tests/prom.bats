@@ -83,7 +83,7 @@ _promtool() {
     grep -qx "dsb_coverage_items{class=\"archived\",host=\"$HOST\",stack=\"$STACK\"} 1" "$PROM"
     grep -qx "dsb_coverage_uncovered{host=\"$HOST\",stack=\"$STACK\"} 0" "$PROM"
     grep -qx "dsb_coverage_unknown{host=\"$HOST\",stack=\"$STACK\"} 0" "$PROM"
-    for m in dsb_unowned_appdata_dirs dsb_unowned_appdata_unexempt dsb_exemptions_stale; do
+    for m in dsb_unowned_appdata_dirs dsb_unowned_appdata_unexempt dsb_unowned_appdata_unknown dsb_exemptions_stale; do
         grep -qE "^$m\{host=\"$HOST\"\} [0-9]+$" "$PROM"
     done
     [ "$(stat -c %a "$PROM")" = 644 ]

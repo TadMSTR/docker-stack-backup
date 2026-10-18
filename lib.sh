@@ -869,7 +869,8 @@ create_compressed_archive_elevated() {
 # SECURITY[deferred]: archives (and the .incomplete file) take the process umask, so on
 # the backup share they are world-readable (0664) although they hold full appdata. The
 # fix (umask 077) waits on a restore/verify read path that works when root is squashed
-# on an NFS destination. Target: docker-stack-backup-2026-10 p3/p5. Ticket #1089 (id 1172).
+# on an NFS destination. Target: docker-stack-backup-2026-10 p5 (moved from p3c by the
+# programme ledger: it needs the atlas export's root mapping). Ticket #1089 (id 1172).
 # Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-04).
 create_archive_atomic() {
     local final_file="$1"; shift

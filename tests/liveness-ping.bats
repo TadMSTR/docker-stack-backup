@@ -76,3 +76,11 @@ output = "/tmp/x'
     run_backup
     [ ! -s "$CURL_LOG" ]
 }
+
+@test "a status write failure pings /fail, not success: the record the alerts read is stale" {
+    : > "$TEST_DIR/not-a-dir"
+    export STATUS_FILE="$TEST_DIR/not-a-dir/status.json"
+    run_backup
+    [ "$status" -eq 1 ]
+    [ "$(_pings | tail -1)" = 'url = "https://hc.example/ping/SECRET-KEY-123/fail"' ]
+}

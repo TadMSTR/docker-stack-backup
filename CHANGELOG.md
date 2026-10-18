@@ -29,6 +29,9 @@ source for #494's coverage dashboard and alerts. See [STATUS.md](STATUS.md).
   node_exporter textfile format. Labels are stack names and fixed enums only.
 - **Liveness ping** (`PING_URL`, off by default): `/start`, success, `/fail`, in the
   Healthchecks.io scheme. The URL goes to curl via `-K`, never argv, and is never logged.
+- An `APPDATA_PATH` that cannot be listed makes coverage `unknown`
+  (`dsb_unowned_appdata_unknown 1`), never an empty "ok". A run whose status could not be
+  written pings `/fail`, not success.
 - **`--coverage-report`**: prints the classifier's JSON for every stack and exits. Read-only.
 - **New failure reasons** in status.json: `stop-failed`, `archive-failed`,
   `restart-failed`, for the three failure paths that had none. Every reason is listed in
