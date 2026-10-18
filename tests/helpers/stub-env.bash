@@ -6,9 +6,13 @@
 #   docker     — records every invocation in $DOCKER_LOG; `compose ps --services
 #                --filter status=running` prints $STATE_FILE; `compose stop` empties
 #                it; `compose start <svcs>` / `compose up ... <svcs>` write <svcs> to it.
-#                STUB_START_RC makes `compose start` fail with that code; STUB_PS_RC
+#                STUB_START_RC makes `compose start` fail with that code (STUB_STOP_RC
+#                and STUB_UP_RC do the same for `stop` and `up`); STUB_PS_RC
 #                makes `compose ps` fail (as a YAML error or unset ${VAR:?} does).
-#                Plain `docker ps` (the label cross-check) prints $STUB_LIVE.
+#                Plain `docker ps` (the label cross-check) prints $STUB_LIVE; with a
+#                `volume=` filter it prints $STUB_LIVE_VOLUME instead. `compose config`
+#                prints $STUB_CONFIG_DIR/<stack dir name>.json (exit 1 with a message
+#                if absent, or exit $STUB_CONFIG_RC with STUB_CONFIG_RC set).
 #   systemctl  — always reports docker active.
 #   sudo       — transparent (exec "$@"), so ELEVATION_CMD=sudo runs unprivileged.
 # And $HELPER, a stand-in elevation helper that tars the standard layout to stdout.
@@ -37,6 +41,15 @@ services:
     image: busybox
 YAML
 
+    export STUB_CONFIG_DIR="$TEST_DIR/compose-config"
+    mkdir -p "$STUB_CONFIG_DIR"
+    cat > "$STUB_CONFIG_DIR/$STACK.json" <<JSON
+{"name": "$STACK", "services": {
+  "app": {"image": "busybox", "volumes": [
+    {"type": "bind", "source": "$APPDATA_PATH/$STACK", "target": "/data", "bind": {}}]},
+  "worker": {"image": "busybox"}}}
+JSON
+
     export DOCKER_LOG="$TEST_DIR/docker.log"
     export STATE_FILE="$TEST_DIR/running"
     : > "$DOCKER_LOG"
@@ -49,7 +62,11 @@ YAML
 echo "$*" >> "$DOCKER_LOG"
 [[ "$1" == info ]] && exit 0
 if [[ "$1" == ps ]]; then
-    [[ -n "${STUB_LIVE:-}" ]] && echo "$STUB_LIVE"
+    if [[ "$*" == *"--filter volume="* ]]; then
+        [[ -n "${STUB_LIVE_VOLUME:-}" ]] && echo "$STUB_LIVE_VOLUME"
+    else
+        [[ -n "${STUB_LIVE:-}" ]] && echo "$STUB_LIVE"
+    fi
     exit 0
 fi
 [[ "$1" == compose ]] || exit 0
@@ -58,13 +75,21 @@ case "$1" in
     ps)
         [[ "${STUB_PS_RC:-0}" -ne 0 ]] && { echo "stub: invalid compose project" >&2; exit "$STUB_PS_RC"; }
         cat "$STATE_FILE" ;;
-    stop)  : > "$STATE_FILE" ;;
+    config)
+        [[ "${STUB_CONFIG_RC:-0}" -ne 0 ]] && { echo "stub: services.app.image must be a string" >&2; exit "$STUB_CONFIG_RC"; }
+        f="${STUB_CONFIG_DIR:-/nonexistent}/$(basename "$PWD").json"
+        [[ -f "$f" ]] || { echo "stub: no config for $(basename "$PWD")" >&2; exit 1; }
+        cat "$f" ;;
+    stop)
+        [[ "${STUB_STOP_RC:-0}" -ne 0 ]] && exit "$STUB_STOP_RC"
+        : > "$STATE_FILE" ;;
     start)
         shift
         [[ "${STUB_START_RC:-0}" -ne 0 ]] && exit "$STUB_START_RC"
         printf '%s\n' "$@" > "$STATE_FILE" ;;
     up)
         shift
+        [[ "${STUB_UP_RC:-0}" -ne 0 ]] && exit "$STUB_UP_RC"
         svcs=()
         for a in "$@"; do
             case "$a" in -d|--no-recreate|--pull|never|--no-build|--no-deps) ;; *) svcs+=("$a") ;; esac

@@ -67,3 +67,25 @@ teardown() {
     [[ "$output" == *"Cannot determine running state of $STACK"* ]]
     [ -z "$(find "$BACKUP_DEST" -name '*.tar*')" ]
 }
+
+@test "#1090 R2-02: renamed project + symlinked path is detected as running (volume filter)" {
+    # The stack runs under another project name, started through a symlink: neither
+    # working_dir label query matches, compose ps (this dir's project) reports nothing.
+    : > "$STATE_FILE"
+    ln -s "$DOCKHAND_BASE" "$TEST_DIR/docker-link"
+    export DOCKHAND_BASE="$TEST_DIR/docker-link"
+    export STUB_LIVE_VOLUME="0123456789ab"
+    run_backup
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Failed stacks: $STACK (running-state-mismatch)"* ]]
+    [ -z "$(find "$BACKUP_DEST" -name '*.tar*')" ]
+    grep -qF "ps -q --filter volume=$APPDATA_PATH/$STACK --filter status=running" "$DOCKER_LOG"
+}
+
+@test "#1090 R2-02 control: no volume hit, a genuinely stopped stack is still archived" {
+    : > "$STATE_FILE"
+    unset STUB_LIVE_VOLUME
+    run_backup
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Backed up while stopped: $STACK (stopped)"* ]]
+}

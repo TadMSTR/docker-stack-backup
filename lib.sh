@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.5.3"
+DSB_VERSION="0.6.0"
 
 #######################################
 # OS Detection
@@ -151,7 +151,16 @@ release_lock() {
 # The cross-check reads container labels only, so it does not depend on the compose
 # file parsing. Label filters with the same key are ANDed by docker, hence one query per
 # spelling of the path (as given, and symlink-resolved).
-# Requires: LOG_FILE (compose/docker stderr is appended there)
+# A third, path-independent query asks docker for running containers that bind-mount
+# $APPDATA_PATH/<stack> itself (docker matches a bind mount's source, or a mount
+# destination, against `--filter volume=`). It catches a stack started under a different
+# project name AND through a different path spelling, e.g. via a symlink: compose
+# stores the unresolved path in the label, so neither label query matches (#1090
+# R2-02). It misses containers that mount only subdirectories of the appdata dir. A hit
+# from another stack's container that binds this stack's appdata also returns 3: that
+# appdata is live, so archiving it "stopped" would not be consistent either.
+# Requires: LOG_FILE (compose/docker stderr is appended there); APPDATA_PATH for the
+# third query (skipped when unset)
 #######################################
 get_running_services() {
     local stack_path="$1"
@@ -171,6 +180,12 @@ get_running_services() {
             fi
             [[ "$resolved" == "$stack_path" ]] && break
         done
+        if [[ -n "${APPDATA_PATH:-}" ]]; then
+            live=$(docker ps -q --filter "volume=$APPDATA_PATH/$(basename "$stack_path")" --filter "status=running" 2>>"${LOG_FILE:-/dev/null}") || return 1
+            if [[ -n "$live" ]]; then
+                return 3
+            fi
+        fi
     fi
 
     printf '%s' "$out"

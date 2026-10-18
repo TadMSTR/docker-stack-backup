@@ -64,8 +64,10 @@ chmod +x *.sh
 
 # Copy to system bin directory. lib.sh is sourced by every script and
 # MUST be installed alongside them, or the scripts will fail to start.
+# dsb_status.py writes the run status (status.json / .prom) and must sit next to
+# docker-stack-backup.sh.
 sudo cp docker-stack-backup.sh docker-stack-backup-manual.sh docker-stack-restore.sh \
-        backup-verify.sh cleanup-old-backups.sh lib.sh /usr/local/bin/
+        backup-verify.sh cleanup-old-backups.sh lib.sh dsb_status.py /usr/local/bin/
 
 # If you created a config.sh in step 2, copy it to the same directory:
 sudo cp config.sh /usr/local/bin/ && sudo chmod 600 /usr/local/bin/config.sh
@@ -89,6 +91,7 @@ sudo docker-stack-backup-manual.sh
 - **[Post-Restart Hooks](HOOKS.md)** - Run custom fixups after each stack's containers restart
 - **[Compression Configuration](COMPRESSION.md)** - Compression methods, levels, and parallel processing
 - **[Dry-Run Mode](DRY_RUN.md)** - Simulate backups without making changes
+- **[Run Status & Coverage](STATUS.md)** - `status.json`, the Prometheus textfile, the coverage classifier and its exemptions, the liveness ping
 - **[Safety Features & Error Handling](SAFETY_FEATURES.md)** - Built-in checks that prevent common failure scenarios
 - **[OS Compatibility](OS_COMPATIBILITY.md)** - Supported Linux distributions and detection
 - **[Homelab Setup Example](HOMELAB_SETUP.md)** - Example deployment on a home lab host
@@ -102,7 +105,7 @@ sudo docker-stack-backup-manual.sh
 - Dockhand for stack management
 - `curl` for notifications (optional)
 - `sendmail` or SMTP access for email (optional)
-- `python3` for safe notification encoding — Matrix JSON bodies and room IDs, Pushover form data (optional; reduced-safety shell fallbacks used if absent)
+- `python3` (standard library only) for the run status — `status.json`, the `.prom` file and the coverage report (on by default; see [STATUS.md](STATUS.md)) — and for safe notification encoding (Matrix JSON bodies and room IDs, Pushover form data). Without it, set `STATUS_ENABLED=false`; notifications then use reduced-safety shell fallbacks
 - `bats` for running tests: `apt install bats` (optional)
 
 ## Architecture

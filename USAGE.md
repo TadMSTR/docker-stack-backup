@@ -40,8 +40,8 @@ cd docker-stack-backup
 # Make scripts executable
 chmod +x *.sh
 
-# Install to system
-sudo cp *.sh /usr/local/bin/
+# Install to system (dsb_status.py writes the run status; keep it next to the scripts)
+sudo cp *.sh dsb_status.py /usr/local/bin/
 
 # Create log directory (if it doesn't exist)
 sudo touch /var/log/docker-backup.log
@@ -169,6 +169,38 @@ This will:
 2. Backup only those with appdata bind mounts
 3. Preserve container run states
 4. Send notifications (if configured)
+5. Write the run status: `status.json` next to the run dirs (and a copy inside this run's
+   dir), plus `docker_stack_backup.prom` if `PROM_TEXTFILE_DIR` is set. See
+   [STATUS.md](STATUS.md)
+
+### Stack results and reasons
+
+Every stack ends as `backed_up`, `skipped` or `failed`, and `status.json` records why.
+These values are a contract from 0.6.0 on: alerts and dashboards match on them.
+
+| Result | Reason | Meaning |
+|---|---|---|
+| skipped | `no-appdata-reference` | the compose file never names `APPDATA_PATH` |
+| skipped | `appdata-missing` | `APPDATA_PATH/<stack>` does not exist |
+| skipped | `appdata-empty` | `APPDATA_PATH/<stack>` is empty (checked only without ELEVATION_CMD) |
+| skipped | `not-running` | nothing runs and `BACKUP_STOPPED_STACKS=false` |
+| failed | `compose-ps-failed` | `docker compose ps` failed, so the running state is unknown |
+| failed | `running-state-mismatch` | compose sees nothing running, docker does |
+| failed | `stop-failed` | `docker compose stop` failed (what was running is started again) |
+| failed | `archive-failed` | the archive could not be written (what was running is started again) |
+| failed | `restart-failed` | archived, but the stack did not come back up (CRITICAL notification) |
+
+`no-compose-file` exists in the code but is never recorded: a dir without a compose file
+is not counted as a stack. The log and notification text keep their 0.5.x wording, so the
+last three failures appear there as a bare `Failed stacks: <name>`; `status.json` carries
+the reason.
+
+To see what each stack holds that the archive does **not** take (named volumes, writable
+host paths, appdata dirs no stack owns), without stopping or writing anything:
+
+```bash
+docker-stack-backup.sh --coverage-report | python3 -m json.tool | less
+```
 
 ### Manual Backup (Selected Stacks)
 

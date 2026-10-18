@@ -104,6 +104,17 @@ NTFY_URGENT_ONLY="${NTFY_URGENT_ONLY:-false}"
 ELEVATION_CMD="${ELEVATION_CMD:-none}"
 ELEVATION_HELPER_PATH="${ELEVATION_HELPER_PATH:-}"
 
+# Status contract (see STATUS.md). status.json is a regular file next to the run dirs:
+# restore, verify and cleanup enumerate only directories there, so a file is invisible
+# to them, where a directory would be counted as a run and deleted by retention.
+STATUS_ENABLED="${STATUS_ENABLED:-true}"
+STATUS_FILE="${STATUS_FILE:-$BACKUP_DEST/$HOSTNAME/status.json}"
+PROM_TEXTFILE_DIR="${PROM_TEXTFILE_DIR:-}"
+COVERAGE_EXEMPTIONS_FILE="${COVERAGE_EXEMPTIONS_FILE:-$SCRIPT_DIR/coverage-exemptions.conf}"
+COVERAGE_IGNORE_PATHS="${COVERAGE_IGNORE_PATHS:-}"
+# Secret-bearing (a Healthchecks ping URL carries its key): never logged, never on argv.
+PING_URL="${PING_URL:-}"
+
 # Post-restart hooks (see HOOKS.md)
 # shellcheck disable=SC2034  # consumed by run_post_restart_hooks in lib.sh
 POST_RESTART_HOOKS=(${POST_RESTART_HOOKS[@]+"${POST_RESTART_HOOKS[@]}"})
@@ -124,7 +135,36 @@ fi
 mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 # shellcheck disable=SC2034
 LOCK_FD=200
-trap release_lock EXIT INT TERM
+
+# Run status, written once per real run: by finalize_run_status at the end, or by the
+# EXIT handler on an abort path. STATUS_ARMED is set only after argument parsing, for a
+# real run, so a dry run or --help never replaces the nightly's record.
+STATUS_ARMED=false
+STATUS_DONE=false
+ABORT_REASON=""
+RUN_TMP=""
+RUN_STARTED=""
+
+# One EXIT handler: write the abort status (if the run was armed and never finished),
+# then release the lock. A second `trap ... EXIT` would silently replace the first, so
+# everything that must happen at exit goes here. INT and TERM exit through it; with
+# `trap release_lock INT` bash ran the handler and then carried on with the run.
+on_exit() {
+    local rc=$?
+    trap - EXIT
+    if [[ "$STATUS_ARMED" == true && "$STATUS_DONE" != true ]]; then
+        write_run_status "${ABORT_REASON:-interrupted}" || true
+        send_ping fail || true
+    fi
+    if [[ -n "$RUN_TMP" ]]; then
+        rm -rf -- "$RUN_TMP" || true
+    fi
+    release_lock || true
+    exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 
 check_docker_running() {
@@ -262,6 +302,105 @@ run_preflight_checks() {
     return 0
 }
 
+#######################################
+# Status contract helpers (dsb_status.py does the encoding; bash never builds JSON)
+#######################################
+dsb_status() {
+    python3 -I "$SCRIPT_DIR/dsb_status.py" "$@"
+}
+
+# Log each line the helper wrote to stderr (it makes them printable; log does too).
+log_status_diagnostics() {
+    local file="$1" line
+    [[ -s "$file" ]] || return 0
+    while IFS= read -r line; do
+        log_warning "status: $line"
+    done < "$file"
+}
+
+# record_stack <name> <result> <reason> <mode> <archive> <bytes> <started> <finished> <downtime>
+record_stack() {
+    [[ "$STATUS_ARMED" == true && -n "$RUN_TMP" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0   # write_run_status reports it
+    if ! dsb_status record "$RUN_TMP/records.jsonl" "$@" 2>>"$RUN_TMP/diag"; then
+        log_warning "status: could not record the result for $1"
+    fi
+}
+
+# write_run_status [abort_reason] — status.json and/or the .prom file. Returns 1 if a
+# requested file could not be written.
+write_run_status() {
+    local aborted="${1:-}"
+    local status_file=""
+    [[ "$STATUS_ENABLED" == true ]] && status_file="$STATUS_FILE"
+    [[ -n "$status_file" || -n "$PROM_TEXTFILE_DIR" ]] || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        log_error "python3 not found: status.json / .prom not written. Install python3, or set STATUS_ENABLED=false and leave PROM_TEXTFILE_DIR empty (STATUS.md)"
+        return 1
+    fi
+    local diag="${RUN_TMP:-/tmp}/diag.finalize"
+    [[ -n "$RUN_TMP" ]] || diag=/dev/null
+    local summary rc=0
+    summary=$(dsb_status finalize \
+        --records "${RUN_TMP:-/nonexistent}/records.jsonl" \
+        --stack-base "$(dockhand_stack_base)" \
+        --appdata "$APPDATA_PATH" \
+        --exemptions "$COVERAGE_EXEMPTIONS_FILE" \
+        --ignore-paths "$COVERAGE_IGNORE_PATHS" \
+        --status-file "$status_file" \
+        --run-dir "$BACKUP_DEST/$HOSTNAME/$TIMESTAMP" \
+        --prom-dir "$PROM_TEXTFILE_DIR" \
+        --host "$HOSTNAME" --run-id "$TIMESTAMP" --version "$DSB_VERSION" \
+        --started "${RUN_STARTED:-}" --dest "$BACKUP_DEST" \
+        --aborted "$aborted" 2>"$diag") || rc=$?
+    [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$RUN_TMP/diag"
+    [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$diag"
+    if [[ -n "$summary" ]]; then
+        log "$summary"
+    fi
+    if [[ $rc -ne 0 ]]; then
+        log_error "Could not write the run status (status.json / .prom); see the warnings above"
+        return 1
+    fi
+    [[ -n "$status_file" ]] && log "Status written: $status_file"
+    return 0
+}
+
+# The normal end of a real run. Preflight has passed, so the share is mounted and the
+# host dir may be created (a run that archived nothing never made it). The abort path
+# never creates it: an unmounted share must not get a local stand-in.
+finalize_run_status() {
+    STATUS_DONE=true
+    [[ "$STATUS_ARMED" == true ]] || return 0
+    if [[ "$STATUS_ENABLED" == true ]]; then
+        mkdir -p -- "$(dirname -- "$STATUS_FILE")" 2>/dev/null || true
+    fi
+    write_run_status ""
+}
+
+# send_ping start|success|fail — Healthchecks-style liveness ping, if PING_URL is set.
+# The URL goes to curl through a config on a file descriptor (-K), not argv, so `ps`
+# never shows its key, and it is never logged. A ping error never fails the run.
+send_ping() {
+    [[ -n "${PING_URL:-}" ]] || return 0
+    local url="${PING_URL%/}"
+    case "$1" in
+        start) url+="/start" ;;
+        fail)  url+="/fail" ;;
+    esac
+    if [[ ! "$url" =~ ^https?:// || "$url" == *[[:cntrl:]]* ]]; then
+        log_warning "PING_URL is not an http(s) URL; liveness ping skipped"
+        return 0
+    fi
+    local esc="${url//\\/\\\\}"
+    esc="${esc//\"/\\\"}"
+    if ! curl -fsS -o /dev/null -m 10 --retry 2 \
+        -K <(printf 'url = "%s"\n' "$esc") >/dev/null 2>&1; then
+        log_warning "Liveness ping failed ($1)"
+    fi
+    return 0
+}
+
 stack_has_appdata() {
     local compose_file="$1"
     
@@ -358,14 +497,23 @@ simulate_backup_stack() {
 # Return codes: 0 = backed up, 1 = failed, 2 = skipped. On 2, STACK_SKIP_REASON holds
 # one of: no-compose-file, no-appdata-reference, appdata-missing, appdata-empty,
 # not-running. On 1, STACK_FAIL_REASON may hold compose-ps-failed or
-# running-state-mismatch. On 0, STACK_BACKUP_MODE is "running" (stopped, archived,
-# started) or "stopped" (already stopped; archived without stop/start).
+# running-state-mismatch (these appear in the log and notifications); otherwise
+# STACK_FAIL_POINT holds stop-failed, archive-failed or restart-failed (status contract
+# only, so the "Failed stacks:" text stays as it was). On 0, STACK_BACKUP_MODE is "running"
+# (stopped, archived, started) or "stopped" (already stopped; archived without
+# stop/start). For the status contract it also sets STACK_ARCHIVE (path relative to
+# BACKUP_DEST/HOSTNAME), STACK_ARCHIVE_BYTES and STACK_DOWNTIME_S (stop -> started;
+# 0 for a stopped stack; empty if never stopped or never started again).
 backup_stack() {
     local stack_path="$1"
     local stack_name; stack_name=$(basename "$stack_path")
     STACK_SKIP_REASON=""
     STACK_FAIL_REASON=""
     STACK_BACKUP_MODE=""
+    STACK_FAIL_POINT=""
+    STACK_ARCHIVE=""
+    STACK_ARCHIVE_BYTES=""
+    STACK_DOWNTIME_S=""
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
@@ -438,10 +586,13 @@ backup_stack() {
     
     # `stop`, not `down`: the containers are kept, so the restart below is a plain
     # `start` — no recreation, no image pull, no pending compose change applied.
+    local stop_epoch=""
     if [[ -n "$running_containers" ]]; then
         log "Stopping stack: $stack_name"
+        stop_epoch=$(date +%s)
         if ! (cd "$stack_path" && docker compose stop); then
             log_error "Failed to stop stack $stack_name"
+            STACK_FAIL_POINT="stop-failed"
             # A partial stop leaves some services down; bring back what was running.
             restart_stack_with_retry "$stack_path" "$running_containers" || true
             return 1
@@ -480,8 +631,11 @@ backup_stack() {
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | tee -a "$LOG_FILE"; then
         log_success "Backup created: $backup_file"
+        STACK_ARCHIVE="$TIMESTAMP/${stack_name}${backup_ext}"
+        STACK_ARCHIVE_BYTES=$(stat -c %s -- "$backup_file" 2>/dev/null) || STACK_ARCHIVE_BYTES=""
     else
         log_error "Failed to create backup for $stack_name"
+        STACK_FAIL_POINT="archive-failed"
         # Restore only previously running containers
         if [[ -n "$running_containers" ]]; then
             log "Restoring previously running containers"
@@ -492,6 +646,7 @@ backup_stack() {
     
     if [[ -z "$running_containers" ]]; then
         STACK_BACKUP_MODE="stopped"
+        STACK_DOWNTIME_S=0
         log_success "Stack $stack_name backed up (stopped; not started)"
         return 0
     fi
@@ -500,8 +655,10 @@ backup_stack() {
     log "Starting previously running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
     if ! restart_stack_with_retry "$stack_path" "$running_containers"; then
         # restart_stack_with_retry already logged and notified
+        STACK_FAIL_POINT="restart-failed"
         return 1
     fi
+    STACK_DOWNTIME_S=$(( $(date +%s) - stop_epoch ))
     
     # Run any configured post-restart hooks (non-fatal on hook failure)
     run_post_restart_hooks "$stack_name" "$stack_path"
@@ -515,6 +672,7 @@ backup_stack() {
 # Main function
 #######################################
 main() {
+    local coverage_report=false
     # Parse command line arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
@@ -522,12 +680,18 @@ main() {
                 DRY_RUN=true
                 shift
                 ;;
+            --coverage-report)
+                coverage_report=true
+                shift
+                ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
                 echo "Options:"
-                echo "  --dry-run, -n    Simulate backup without making changes"
-                echo "  --help, -h       Show this help message"
+                echo "  --dry-run, -n       Simulate backup without making changes"
+                echo "  --coverage-report   Print the coverage classifier's JSON for every stack"
+                echo "                      (read-only: stops, archives and writes nothing)"
+                echo "  --help, -h          Show this help message"
                 echo ""
                 echo "Examples:"
                 echo "  $0                Run backup normally"
@@ -542,6 +706,21 @@ main() {
         esac
     done
     
+    if [[ "$coverage_report" == true ]]; then
+        # stdout is the JSON only: no lock was taken, so nothing is logged at exit.
+        LOCK_FD=""
+        run_coverage_report
+        exit $?
+    fi
+
+    # A real run records its outcome, aborts included; a dry run never does.
+    if [[ "$DRY_RUN" != true ]] && \
+       [[ "$STATUS_ENABLED" == true || -n "$PROM_TEXTFILE_DIR" || -n "$PING_URL" ]]; then
+        RUN_STARTED=$(date +%s)
+        RUN_TMP=$(mktemp -d)
+        STATUS_ARMED=true
+    fi
+
     if [[ "$DRY_RUN" == true ]]; then
         echo -e "${BOLD}${CYAN}=========================================${NC}"
         echo -e "${BOLD}${CYAN}DRY RUN MODE - No changes will be made${NC}"
@@ -561,21 +740,26 @@ main() {
     
     # Require root, unless ELEVATION_CMD is configured to elevate archive creation
     if ! require_privileged_or_elevated; then
+        ABORT_REASON="not-privileged"
         exit 1
     fi
     
     if ! validate_numeric_config; then
+        ABORT_REASON="invalid-config"
         exit 1
     fi
     
     # Acquire lock to prevent concurrent runs (skip in dry-run)
     if [[ "$DRY_RUN" != true ]]; then
+        ABORT_REASON="lock-held"   # acquire_lock exits on failure
         acquire_lock
+        ABORT_REASON=""
     fi
     
     # Run pre-flight checks
     if ! run_preflight_checks; then
         log_error "Pre-flight checks failed, aborting"
+        ABORT_REASON="preflight-failed"
         exit 1
     fi
     
@@ -684,6 +868,7 @@ main() {
     
     # Normal backup mode
     
+    send_ping start
     local -a stopped_names=() skipped_entries=() failed_names=()
     
     # Iterate through all stacks
@@ -702,7 +887,18 @@ main() {
         
         local result=0
         local stack_name; stack_name=$(basename "$stack_path")
+        local stack_started; stack_started=$(date +%s)
         backup_stack "$stack_path" || result=$?
+        local stack_finished; stack_finished=$(date +%s)
+        local rec_result=failed rec_reason="${STACK_FAIL_REASON:-${STACK_FAIL_POINT:-}}"
+        if [[ $result -eq 0 ]]; then
+            rec_result=backed_up; rec_reason=""
+        elif [[ $result -eq 2 ]]; then
+            rec_result=skipped; rec_reason="${STACK_SKIP_REASON:-}"
+        fi
+        record_stack "$stack_name" "$rec_result" "$rec_reason" "${STACK_BACKUP_MODE:-}" \
+            "${STACK_ARCHIVE:-}" "${STACK_ARCHIVE_BYTES:-}" "$stack_started" \
+            "$stack_finished" "${STACK_DOWNTIME_S:-}"
         
         if [[ $result -eq 0 ]]; then
             # Successfully backed up
@@ -757,12 +953,44 @@ main() {
     log "========================================="
     
     # Send notifications
+    local rc=0
     if [[ $failed -gt 0 ]]; then
         send_notifications "failure" "$backed_up" "$skipped" "$failed" "$total_stacks" "$details"
-        exit 1
+        rc=1
     else
         send_notifications "success" "$backed_up" "$skipped" "$failed" "$total_stacks" "$details"
     fi
+    
+    # Status after notifications: coverage runs here, once, after every stack is back up,
+    # and a status write failure makes the run exit non-zero without holding back the
+    # notifications.
+    finalize_run_status || rc=1
+    if [[ $failed -eq 0 ]]; then
+        send_ping success
+    else
+        send_ping fail
+    fi
+    exit "$rc"
+}
+
+#######################################
+# --coverage-report: the classifier's JSON for every stack, read-only. Same stack
+# enumeration as the backup loop (a dir under the stack base with a compose file).
+#######################################
+run_coverage_report() {
+    local stack_base; stack_base=$(dockhand_stack_base)
+    local -a names=()
+    local stack_path
+    for stack_path in "$stack_base"/*; do
+        [[ -d "$stack_path" ]] || continue
+        find_compose_file "$stack_path" >/dev/null || continue
+        names+=("$(basename "$stack_path")")
+    done
+    dsb_status coverage-report \
+        --stack-base "$stack_base" --appdata "$APPDATA_PATH" \
+        --exemptions "$COVERAGE_EXEMPTIONS_FILE" \
+        --ignore-paths "$COVERAGE_IGNORE_PATHS" \
+        -- "${names[@]+"${names[@]}"}"
 }
 
 # Run main function

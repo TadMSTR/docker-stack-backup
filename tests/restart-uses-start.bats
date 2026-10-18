@@ -87,5 +87,7 @@ STUB
 @test "the run header logs the version" {
     run_backup
     [ "$status" -eq 0 ]
-    [[ "$output" == *"Version: docker-stack-backup 0.5.3"* ]]
+    version=$(sed -n 's/^DSB_VERSION="\(.*\)"$/\1/p' "$BATS_TEST_DIRNAME/../lib.sh")
+    [ -n "$version" ]
+    [[ "$output" == *"Version: docker-stack-backup $version"* ]]
 }

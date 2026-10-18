@@ -107,6 +107,16 @@ MATRIX_HOMESERVER="https://matrix.example.com"
 MATRIX_ACCESS_TOKEN=""
 MATRIX_ROOM_ID="!roomid:example.com"
 
+# Run status (see STATUS.md). Every real run writes status.json next to the run dirs:
+# per-stack results and reasons, sizes, downtime, carried-forward last success, and a
+# coverage report (state the archive does not take). Needs python3 (stdlib only).
+STATUS_ENABLED=true
+#STATUS_FILE="$BACKUP_DEST/$(hostname)/status.json"   # default; a regular file, never a dir
+PROM_TEXTFILE_DIR=""          # set to write docker_stack_backup.prom (node_exporter textfile format)
+#COVERAGE_EXEMPTIONS_FILE=""  # default: coverage-exemptions.conf next to the script
+COVERAGE_IGNORE_PATHS=""      # colon-separated extra host paths to class as "system"
+PING_URL=""                   # Healthchecks-style ping: /start, success, /fail. Secret; never logged
+
 # Post-restart hooks (optional)
 # Function names (define the functions below in this file) or command names, run after
 # each stack's containers restart successfully. Each is invoked as:

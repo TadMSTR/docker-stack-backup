@@ -1,5 +1,61 @@
 # Changelog
 
+## [0.6.0] — 2026-10-18
+
+Every run now says what it did in a machine-readable form, including what it did **not**
+back up and why. Programme docker-stack-backup-2026-10 part 3c (vikunja#1086); the data
+source for #494's coverage dashboard and alerts. See [STATUS.md](STATUS.md).
+
+### Added
+
+- **`status.json`** on the share, next to the run dirs, at the end of every real run and
+  on every abort path (`outcome: aborted` with `abort_reason`): per-stack result, reason,
+  mode, archive and actual size, start/finish, downtime, last success, and coverage. A
+  copy goes into the run dir when it holds archives, as history. It is a regular file, so
+  restore, verify and cleanup (which enumerate directories) ignore it. A dry run, the
+  manual script and `--coverage-report` never write it.
+- **Coverage classifier.** Each run classifies every stack's mounts from
+  `docker compose config --format json` (skipped and stopped stacks too) into archived,
+  other-stack-appdata, stack-dir, system, input-ro, uncovered, named-volume and tmpfs, and
+  lists `APPDATA_PATH` dirs that match no stack. A stack whose config cannot be read is
+  `unknown`, never "nothing uncovered". It reports only: backup selection is unchanged.
+- **Coverage exemptions** (`coverage-exemptions.conf`, `<kind>|<subject>|<reason>`): data,
+  never sourced; every entry needs a reason; an entry that matches nothing is reported
+  stale; a malformed line is rejected and reported, and never stops the backup.
+- **Carry-forward of `last_success`**, host and per stack, from the previous status.json.
+  That file is on the share, a root trust boundary, so it is read only by the python
+  helper and only an integer time in [2020-01-01, now + 1 day] survives.
+- **Prometheus textfile** (`PROM_TEXTFILE_DIR`, off by default): `dsb_*` gauges in plain
+  node_exporter textfile format. Labels are stack names and fixed enums only.
+- **Liveness ping** (`PING_URL`, off by default): `/start`, success, `/fail`, in the
+  Healthchecks.io scheme. The URL goes to curl via `-K`, never argv, and is never logged.
+- **`--coverage-report`**: prints the classifier's JSON for every stack and exits. Read-only.
+- **New failure reasons** in status.json: `stop-failed`, `archive-failed`,
+  `restart-failed`, for the three failure paths that had none. Every reason is listed in
+  USAGE.md and is now a contract.
+- `dsb_status.py`: the helper behind all of the above (`python3 -I`, standard library
+  only). **Install it next to `docker-stack-backup.sh`.**
+
+### Changed
+
+- **The running-state check has a third, path-independent query** (#1090 R2-02):
+  `docker ps --filter volume=$APPDATA_PATH/<stack>`. A stack started under another
+  project name *and* through a symlinked path matched neither working-dir label query, so
+  it would have been archived live as "(stopped)". A running container of another stack
+  that binds this stack's appdata dir now also fails the stack (`running-state-mismatch`).
+- **INT and TERM now end the run.** The old `trap release_lock EXIT INT TERM` released the
+  lock on Ctrl-C and then carried on with the backup, unlocked. One EXIT handler now writes
+  the abort status and then releases the lock.
+- The run's exit code is now set after the status is written: a status or `.prom` write
+  failure exits 1, after the notifications have gone out.
+
+### Unchanged on purpose
+
+- Every log line and notification body of 0.5.3, byte for byte (the new reasons are in
+  status.json only; new log lines are `Coverage: …`, `Status written: …` and
+  `status: …` warnings, after the summary).
+- `stack_has_appdata()`: forge's stack-lint R4 copies that predicate.
+
 ## [0.5.3] — 2026-10-14
 
 The fixes from the v0.5.2 security audit (audit p3a, 1 Medium, 2 Low, 3 Info). Restore
