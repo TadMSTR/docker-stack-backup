@@ -404,7 +404,7 @@ tar_helper_setup() {
     snap_setup btrfs
     local liar="$SNAP_T/liar.sh"
     printf '#!/usr/bin/env bash\necho "%s"\n' "relative/path" > "$liar"
-    chmod +x "$liar"
+    chmod 0755 "$liar"
     tar_helper_setup "$liar"
     run bash "$TAR_HELPER" none "$TEMP_SRC" "$SNAP_APPDATA" st --from-snapshot "$TS"
     [ "$status" -eq 1 ]

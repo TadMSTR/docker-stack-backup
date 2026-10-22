@@ -101,7 +101,9 @@ snap_helper_with() {
         -e "s|^SNAPSHOT_DIR=.*|SNAPSHOT_DIR=\"$2\"|" \
         -e "s|^PATH=.*|PATH=\"$SNAP_SHIM:/usr/sbin:/usr/bin:/sbin:/bin\"|" \
         "$BATS_TEST_DIRNAME/../docker-backup-snapshot.sh" > "$SNAP_HELPER"
-    chmod +x "$SNAP_HELPER"
+    # A fixed mode, whatever the caller's umask: the tar helper refuses a group-writable
+    # snapshot helper (F-04), and a 0002 umask would make this one so.
+    chmod 0755 "$SNAP_HELPER"
 }
 
 # The calls that changed something (create/delete/destroy/snapshot), one per line.

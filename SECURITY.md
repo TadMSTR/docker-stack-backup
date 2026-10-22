@@ -85,9 +85,11 @@ snapshot-assisted backup. Its trust boundary:
   root-owned regular file that nobody else can write, that both helpers name the same
   appdata root (`info`), and that the `source` path lies inside that exact snapshot.
 - `create` repeats the boundary check after the stack is stopped, and on btrfs also scans
-  the new snapshot for the empty inode-2 placeholder a nested subvolume leaves. So a
-  subvolume or mount made after `check` makes the stack fall back rather than be archived
-  with a hole in it.
+  the new snapshot for the empty inode-2 placeholder a nested subvolume leaves. That closes
+  the nested-subvolume case whatever its timing. A **mount** (FUSE needs no root), or a
+  ZFS child dataset, made in the moment between that re-check and the snapshot is still
+  not detected. Only the owner of the stack dir can make one, and it can only hide that
+  mount's own contents from the backup.
 - The helper refuses to run if a mount lies between the snapshotted subvolume and the
   appdata root (the snapshot would hold the directory under it).
 

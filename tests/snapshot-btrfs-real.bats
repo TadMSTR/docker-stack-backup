@@ -58,7 +58,7 @@ STUB
     sed -e "s|^ALLOWED_APPDATA_PATH=.*|ALLOWED_APPDATA_PATH=\"$APPDATA\"|" \
         -e "s|^SNAPSHOT_HELPER=.*|SNAPSHOT_HELPER=\"$SNAP_HELPER\"|" \
         "$REPO/docker-backup-tar-create.sh" > "$TAR_HELPER"
-    chmod +x "$SNAP_HELPER" "$TAR_HELPER"
+    chmod 0755 "$SNAP_HELPER" "$TAR_HELPER"
     TEMP_SRC="$(mktemp -d -p /tmp)"
     echo "services: {web: {image: nginx}}" > "$TEMP_SRC/compose.yaml"
     echo "WEB_PORT=80" > "$TEMP_SRC/.env"
