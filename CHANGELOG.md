@@ -65,10 +65,12 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   and `tar -C` into it as root. So a symlink there (or a root-owned directory already in
   `/tmp`) let anyone holding the NOPASSWD grant read any directory as root. It now
   requires a real directory (not a symlink), owned by the invoking user (`SUDO_UID` /
-  `DOAS_USER`), mode 0700, as `mktemp -d` makes it. It `cd -P`s into it, checks `.`, and
-  archives `-C .`. After the `cd` the physical working directory must equal the validated
-  path, so a symlink swapped in at any moment before it is refused too. **Reinstall the tar
-  helper on every host that grants it**, even if you use none of 0.7.0's other features.
+  `DOAS_USER`), mode 0700, as `mktemp -d` makes it, and after `cd -P` the kernel's cwd
+  must be that directory. **Root no longer reads the temp dir at all.** The compose file
+  and `.env` are read as the invoking user (`setpriv`) into a private staging dir, and
+  that is what is archived. So no swap, rename or link in the caller's own dir can make
+  root archive anything the caller could not read itself. **Reinstall the tar helper on
+  every host that grants it**, even if you use none of 0.7.0's other features.
 - The snapshot helper refuses to run when a mount sits between the subvolume it would
   snapshot and the appdata root. A snapshot would show what is under that mount, not the
   mounted data.

@@ -105,8 +105,12 @@ When it is `sudo` or `doas`, `create_compressed_archive()` calls:
 
 `temp_dir` must be the caller's own private directory, as `mktemp -d` makes it: a real
 directory directly under `/tmp` (not a symlink), owned by the invoking user (`SUDO_UID`
-under sudo, `DOAS_USER` under doas), mode 0700. The helper enters it with `cd -P`,
-checks `.` and archives `-C .`. Before 0.7.0 any existing `/tmp/<name>` was accepted,
+and `SUDO_GID` under sudo, `DOAS_USER` under doas), mode 0700. The helper does not read
+it as root. It reads only `compose.yaml`, `compose.yml`, `docker-compose.yaml`,
+`docker-compose.yml` and `.env` from it, **as the invoking user** via `setpriv`
+(util-linux; present on Debian and TrueNAS SCALE). Each must be a regular file of at
+most 16 MiB. It copies them into a private staging dir and archives that, so the archive
+looks exactly as before. Before 0.7.0 any existing `/tmp/<name>` was archived as root,
 which let the grant read any directory as root; reinstall the helper.
 
 `excludes` are the global `EXCLUDE_PATTERNS` (unanchored globs). After `--` come the

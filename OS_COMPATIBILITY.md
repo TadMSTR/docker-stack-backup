@@ -196,6 +196,9 @@ apt install pigz pbzip2 pxz zstd
 - `find`
 - `grep`
 - `sed`
+- `python3` (standard library only: status.json, the coverage classifier, x-backup)
+- `setpriv` (util-linux), for the elevation helper (ELEVATION.md); installed by default on Debian and TrueNAS SCALE
+- `btrfs-progs` or ZFS, only for snapshot-assisted backup on that filesystem
 
 ### Optional (for compression)
 - `gzip` (usually pre-installed)

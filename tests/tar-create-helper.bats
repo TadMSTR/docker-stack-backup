@@ -158,11 +158,11 @@ old_helper() {
 @test "probe: a temp_dir owned by someone else (e.g. a root-owned dir in /tmp) is refused" {
     # The invoking user as sudo reports it: SUDO_UID. A dir we own, claimed by another
     # uid, stands in for a root-owned /tmp dir (PrivateTmp) on an unprivileged runner.
-    SUDO_UID=$((EUID + 1)) run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack
+    SUDO_UID=$((EUID + 1)) SUDO_GID=$((EUID + 1)) run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack
     [ "$status" -eq 2 ]
     [[ "$output" == *"not owned by the invoking user"* ]]
     old_helper
-    SUDO_UID=$((EUID + 1)) bash "$OLD_HELPER" none "$TEMP_SRC" "$APPDATA" mystack > /dev/null   # 0.6.0: accepted
+    SUDO_UID=$((EUID + 1)) SUDO_GID=$((EUID + 1)) bash "$OLD_HELPER" none "$TEMP_SRC" "$APPDATA" mystack > /dev/null   # 0.6.0: accepted
 }
 
 @test "a temp_dir with group or other access is refused (mktemp -d gives 0700)" {
@@ -181,9 +181,9 @@ old_helper() {
     [[ "$output" == *"cannot tell the invoking user"* ]]
 }
 
-@test "R2-01: a symlink swapped in after the -L test is refused after cd -P (pwd -P check)" {
+@test "R2-01/R3-01: a symlink swapped in after the -L test is refused after cd -P (kernel cwd check)" {
     # The race is made deterministic: a copy of the helper without its `! -L` test, given
-    # a symlink. Only the pwd -P check stands between it and the symlink's target.
+    # a symlink. Only the cwd-vs-lstat inode check stands between it and the target.
     local secret="$TEST_DIR/secret"
     mkdir -m 0700 "$secret" && echo topsecret > "$secret/shadow-like"
     local link="/tmp/dsb-r201-probe-$$"
@@ -196,8 +196,76 @@ old_helper() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"temp_dir was replaced while it was being entered"* ]]
     [[ "$output" != *shadow-like* ]]
-    # Without the pwd -P check as well, the probe fires: the target is archived.
+    # A swap-back defeats a check of bash's own path string (builtin `pwd -P`, R3-01): the
+    # inode check reads the kernel's cwd instead. Shown with the check removed as well:
+    # then the staging (below) is all that is left, and it archives none of the target.
     grep -v 'was replaced while it was being entered' "$nolink" > "$TEST_DIR/helper-naive.sh"
     bash "$TEST_DIR/helper-naive.sh" none "$link" "$APPDATA" mystack > "$TEST_DIR/naive.tar"
-    tar -tf "$TEST_DIR/naive.tar" | grep -qx './shadow-like'
+    ! tar -tf "$TEST_DIR/naive.tar" | grep -q 'shadow-like'
+}
+
+# ---------------------------------------------------------------------------
+# Staging (audit p5a R3-01, option B): root archives only the allowlisted regular
+# files of the temp dir, read as the invoking user, from its own staging dir.
+# ---------------------------------------------------------------------------
+
+@test "staging: only compose files and .env are archived, as regular files with their modes" {
+    echo "A=1" > "$TEMP_SRC/.env"; chmod 0600 "$TEMP_SRC/.env"
+    mkdir "$TEMP_SRC/sub" && echo nested > "$TEMP_SRC/sub/f"
+    echo other > "$TEMP_SRC/notes.txt"
+    bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack > "$TEST_DIR/out.tar"
+    run bash -c "tar -tf '$TEST_DIR/out.tar' | grep -v '^mystack' | LC_ALL=C sort"
+    [ "$output" = "$(printf './\n./.env\n./compose.yaml')" ]
+    tar -tvf "$TEST_DIR/out.tar" ./.env | grep -q '^-rw-------'
+    [ "$(tar -xOf "$TEST_DIR/out.tar" ./.env)" = "A=1" ]
+    [ "$(tar -xOf "$TEST_DIR/out.tar" ./compose.yaml)" = "services: {}" ]
+    # The staging dir is removed afterwards.
+    [ -z "$(find /tmp -maxdepth 1 -name 'dsb-stage.*' -user "$(id -u)" -newer "$TEMP_SRC/.env" 2>/dev/null)" ]
+}
+
+@test "staging: an allowlisted name that is a symlink (or a directory) is refused" {
+    ln -s /etc/hostname "$TEMP_SRC/.env"
+    run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack
+    [ "$status" -eq 2 ]
+    [[ "$output" == *".env in temp_dir is not a regular file"* ]]
+    rm "$TEMP_SRC/.env" && mkdir "$TEMP_SRC/.env"
+    run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack
+    [ "$status" -eq 2 ]
+}
+
+@test "staging: a file over 16 MiB is refused (a link to /dev/zero cannot fill root's /tmp)" {
+    truncate -s $((16 * 1024 * 1024 + 1)) "$TEMP_SRC/.env"
+    run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"larger than"* ]]
+}
+
+@test "staging: as root, every read of the caller's files goes through setpriv as the caller" {
+    # No real root here: a copy forced onto the privilege-drop path, with a setpriv shim
+    # that logs its options and runs the command (as us). The real drop is checked at deploy.
+    local shim="$TEST_DIR/shim"; mkdir -p "$shim"
+    cat > "$shim/setpriv" <<STUB
+#!/usr/bin/env bash
+args=(); while [[ \$# -gt 0 && "\$1" != -- ]]; do args+=("\$1"); shift; done; shift
+printf '%s\n' "\${args[*]} :: \$1" >> "$TEST_DIR/setpriv.log"
+exec "\$@"
+STUB
+    chmod +x "$shim/setpriv"
+    sed -e 's/^drop_privs=false$/drop_privs=true/' \
+        -e "s|^PATH=.*|PATH=\"$shim:/usr/sbin:/usr/bin:/sbin:/bin\"|" "$HELPER" > "$TEST_DIR/helper-drop.sh"
+    grep -q '^drop_privs=true$' "$TEST_DIR/helper-drop.sh"
+    echo "A=1" > "$TEMP_SRC/.env"
+    SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" bash "$TEST_DIR/helper-drop.sh" none "$TEMP_SRC" "$APPDATA" mystack > "$TEST_DIR/out.tar"
+    run cat "$TEST_DIR/setpriv.log"
+    # A stat for each of the 5 allowlisted names, a read (head) for the 2 present; all
+    # with the caller's ids, none as root.
+    [ "${#lines[@]}" -eq 7 ]
+    [ "$(grep -c ':: stat$' "$TEST_DIR/setpriv.log")" -eq 5 ]
+    [ "$(grep -c ':: head$' "$TEST_DIR/setpriv.log")" -eq 2 ]
+    local l
+    for l in "${lines[@]}"; do
+        [[ "$l" == "--reuid=$(id -u) --regid=$(id -g) --clear-groups --no-new-privs :: "* ]]
+    done
+    [[ "$output" == *":: stat"* && "$output" == *":: head"* ]]
+    [ "$(tar -xOf "$TEST_DIR/out.tar" ./.env)" = "A=1" ]
 }

@@ -82,20 +82,26 @@ esac
 # p5a F-01). Who the caller is: sudo sets SUDO_UID and doas sets DOAS_USER, and neither
 # can be set by the caller through them; otherwise it is whoever runs this.
 invoker_uid="$EUID"
+invoker_gid=$(id -g)
 if [[ -n "${SUDO_UID:-}" ]]; then
     invoker_uid="$SUDO_UID"
+    invoker_gid="${SUDO_GID:-}"
 elif [[ -n "${DOAS_USER:-}" ]]; then
     invoker_uid=$(id -u -- "$DOAS_USER" 2>/dev/null) || invoker_uid=""
+    invoker_gid=$(id -g -- "$DOAS_USER" 2>/dev/null) || invoker_gid=""
 fi
-[[ "$invoker_uid" =~ ^[0-9]+$ ]] || { echo "docker-backup-tar-create: cannot tell the invoking user" >&2; exit 2; }
+[[ "$invoker_uid" =~ ^[0-9]+$ && "$invoker_gid" =~ ^[0-9]+$ ]] || { echo "docker-backup-tar-create: cannot tell the invoking user" >&2; exit 2; }
 [[ ! -L "$temp_dir" ]] || { echo "docker-backup-tar-create: temp_dir is a symlink: $temp_dir" >&2; exit 2; }
-# The caller owns the /tmp entry and can swap it at any moment, also between the test
-# above and the `cd` below (audit p5a R2-01). So after `cd -P` the physical cwd must BE
-# the validated path: that proves no symlink was followed, whatever happened before.
-# Then the checks on `.` and the archive (`-C .`) use the directory we are in, which no
-# later swap of the entry can change.
+# The caller owns the /tmp entry and can swap it at any moment (audit p5a R2-01, R3-01).
+# After `cd -P`, the KERNEL cwd must be the directory now at the validated path: an
+# lstat of the path (stat without -L; a symlink there never matches) against `.`. (bash's
+# builtin `pwd -P` re-resolves the path string, never getcwd, so a swap-back passed it.)
+# These checks are defence in depth: root does not read the caller's files at all, see
+# "Staging" below.
 cd -P -- "$temp_dir" || { echo "docker-backup-tar-create: cannot enter temp_dir: $temp_dir" >&2; exit 2; }
-[[ "$(pwd -P)" == "$temp_dir" ]] || { echo "docker-backup-tar-create: temp_dir was replaced while it was being entered: $temp_dir" >&2; exit 2; }
+cwd_id=$(stat -c '%d:%i' -- .) || cwd_id=""
+path_id=$(stat -c '%d:%i' -- "$temp_dir") || path_id=""
+[[ -n "$cwd_id" && "$cwd_id" == "$path_id" ]] || { echo "docker-backup-tar-create: temp_dir was replaced while it was being entered: $temp_dir" >&2; exit 2; }
 read -r td_uid td_mode < <(stat -c '%u %a' -- .) || { echo "docker-backup-tar-create: cannot stat temp_dir" >&2; exit 2; }
 [[ "$td_uid" == "$invoker_uid" ]] || { echo "docker-backup-tar-create: temp_dir is not owned by the invoking user (uid $invoker_uid): $temp_dir" >&2; exit 2; }
 (( (8#$td_mode & 8#077) == 0 )) || { echo "docker-backup-tar-create: temp_dir must be mode 0700: $temp_dir" >&2; exit 2; }
@@ -180,6 +186,49 @@ if [[ -n "$snapshot_ts" ]]; then
         || { echo "docker-backup-tar-create: snapshot source is not a directory" >&2; exit 1; }
 fi
 
+#######################################
+# Staging: root never reads the caller's temp dir. Its files (the stack's compose file
+# and .env, the only things the backup puts there) are read AS THE INVOKING USER, through
+# setpriv, and written into a private root-owned staging dir that tar then archives. So
+# whatever the caller does to its own dir (swap it, rename another dir to it, plant a
+# link to a file it cannot read), root only ever archives bytes the caller could read
+# anyway (audit p5a R3-01, option B). Ownership and modes of the staged files are set
+# back to the caller's, so the archive's root members look as they did before.
+#######################################
+STAGE_NAMES=(compose.yaml compose.yml docker-compose.yaml docker-compose.yml .env)
+STAGE_MAX_BYTES=$((16 * 1024 * 1024))
+drop_privs=false
+if [[ $EUID -eq 0 && "$invoker_uid" != 0 ]]; then
+    drop_privs=true
+fi
+as_invoker() {
+    if [[ "$drop_privs" == true ]]; then
+        setpriv --reuid="$invoker_uid" --regid="$invoker_gid" --clear-groups --no-new-privs -- "$@"
+    else
+        "$@"
+    fi
+}
+umask 077
+stage=$(mktemp -d /tmp/dsb-stage.XXXXXXXXXX) || { echo "docker-backup-tar-create: cannot create a staging dir" >&2; exit 1; }
+trap 'rm -rf -- "$stage"' EXIT
+for name in "${STAGE_NAMES[@]}"; do
+    # Relative to the checked cwd. `stat` without -L: a symlink is reported as one.
+    info=$(as_invoker stat -c '%F|%a' -- "./$name" 2>/dev/null) || continue   # absent
+    kind="${info%%|*}" mode="${info##*|}"
+    [[ "$kind" == "regular file" || "$kind" == "regular empty file" ]] \
+        || { echo "docker-backup-tar-create: $name in temp_dir is not a regular file" >&2; exit 2; }
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] || { echo "docker-backup-tar-create: cannot read the mode of $name" >&2; exit 2; }
+    as_invoker head -c "$((STAGE_MAX_BYTES + 1))" -- "./$name" > "$stage/$name" \
+        || { echo "docker-backup-tar-create: cannot read $name as the invoking user" >&2; exit 1; }
+    (( $(stat -c %s -- "$stage/$name") <= STAGE_MAX_BYTES )) \
+        || { echo "docker-backup-tar-create: $name is larger than $STAGE_MAX_BYTES bytes" >&2; exit 2; }
+    chmod "$mode" -- "$stage/$name"
+    chown "$invoker_uid:$invoker_gid" -- "$stage/$name" 2>/dev/null || [[ $EUID -ne 0 ]] \
+        || { echo "docker-backup-tar-create: cannot set the owner of the staged $name" >&2; exit 1; }
+done
+chmod 0700 -- "$stage"
+chown "$invoker_uid:$invoker_gid" -- "$stage" 2>/dev/null || true
+
 compression_flag=()
 case "$compression" in
     none)  ;;
@@ -189,5 +238,7 @@ case "$compression" in
     zstd)  compression_flag=(--zstd) ;;
 esac
 
-# `-C .` is the checked temp dir (the current directory); the source root is absolute.
-exec /usr/bin/tar -c "${compression_flag[@]}" "${exclude_args[@]}" -C . . -C "$source_root" "$stack_name"
+# Not `exec`: the EXIT trap removes the staging dir after tar.
+rc=0
+/usr/bin/tar -c "${compression_flag[@]}" "${exclude_args[@]}" -C "$stage" . -C "$source_root" "$stack_name" || rc=$?
+exit "$rc"

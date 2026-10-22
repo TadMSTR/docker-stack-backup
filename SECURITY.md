@@ -93,11 +93,22 @@ snapshot-assisted backup. Its trust boundary:
 - The helper refuses to run if a mount lies between the snapshotted subvolume and the
   appdata root (the snapshot would hold the directory under it).
 
-The tar helper's `temp_dir` (since 0.7.0): a real, non-symlink directory under `/tmp`,
-owned by the invoking user (`SUDO_UID` / `DOAS_USER`), mode 0700. It is checked after
-`cd -P` and archived as `-C .`. Before 0.7.0 any `/tmp/<name>` was accepted, so a symlink
-there, or a root-owned dir in `/tmp`, let the grant read any directory as root (audit
-2026-10-22, F-01).
+The tar helper's `temp_dir` (since 0.7.0). **Root never reads the caller's temp dir.**
+The only files the backup puts there (the stack's compose file, by one of its four
+names, and `.env`) are read **as the invoking user** (`setpriv --reuid/--regid
+--clear-groups --no-new-privs`, from `SUDO_UID`/`SUDO_GID` or `DOAS_USER`). Each must be
+a regular file of at most 16 MiB. They are copied into a private root-owned staging dir,
+which is what tar archives (owners and modes set back to the caller's). Anything else in
+the temp dir is ignored. So whatever the caller does to its own `/tmp/<name>` (swap it
+for a symlink, rename another of its directories there, plant a link to a file it cannot
+read), root archives only bytes the caller could read itself.
+
+In front of that, as defence in depth, the dir must be a real directory under `/tmp`
+(not a symlink), owned by the invoking user, mode 0700. After `cd -P` the kernel's cwd
+must be the directory at that path (an inode compare, not bash's `pwd -P`). Before 0.7.0
+any `/tmp/<name>` was accepted and archived as root, so a symlink there, or a root-owned
+dir in `/tmp`, let the grant read any directory as root (audit 2026-10-22: F-01, then
+R2-01 and R3-01 on the races in the first two fixes).
 
 **Accepted:** whoever holds the sudo grant can `create` snapshots for any existing stack
 with any well-formed timestamp, each pinning disk until the next sweep (or their own
