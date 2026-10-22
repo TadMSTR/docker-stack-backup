@@ -21,6 +21,11 @@ Include as much detail as possible: the affected component, steps to reproduce, 
 - Privilege escalation or argument injection via the elevation helper
   (`docker-backup-tar-create.sh`) — e.g. smuggling `tar` flags through exclude patterns,
   or reading appdata roots outside the configured allowlist
+- The same via the snapshot helper (`docker-backup-snapshot.sh`): steering a snapshot
+  create, delete, destroy or sweep at anything other than the `dsb-<stack>-<ts>`
+  snapshots of the configured appdata root
+- An `x-backup` declaration that leaves out more than the declared path, or that is
+  applied although it is invalid
 - Dependency vulnerabilities with a plausible exploitation path in docker-stack-backup's usage
 
 **Out of scope:**
@@ -48,6 +53,44 @@ Its security model:
 Reports of a way to (a) make the helper run `tar` with attacker-influenced flags, (b)
 read an appdata root outside `ALLOWED_APPDATA_PATH`, or (c) otherwise gain root through
 the helper are in scope and welcome.
+
+Since 0.7.0 the tar helper also accepts x-backup declared paths (after `--`). Each must
+be `<stack_name>/<path>`, with every part of `<path>` in `[A-Za-z0-9._-]`, none `.`,
+`..` or starting with `-`. They go to tar as anchored, literal `--exclude=` values
+**after** the global patterns. They can only leave data out of the archive. The same
+rule is in `lib.sh` and `dsb_status.py`; `tests/xbackup-path-rule.bats` keeps the three
+copies equal. The helpers pin `LC_ALL=C`, because in a UTF-8 locale bash's `[A-Za-z]`
+matches non-ASCII letters, and sudo keeps `LANG`/`LC_*` by default.
+
+## Snapshot Helper
+
+`docker-backup-snapshot.sh` (0.7.0, optional) creates and deletes snapshots as root for
+snapshot-assisted backup. Its trust boundary:
+
+- **No caller-supplied path, ever.** The root-owned constants (`ALLOWED_APPDATA_PATH`,
+  `SNAPSHOT_BACKEND`, `SNAPSHOT_DIR`) decide every path. The caller passes a verb, a stack
+  name and a run timestamp, each checked against a fixed shape. The snapshot name is
+  always `dsb-<stack>-<YYYYMMDD_HHMMSS>`.
+- **ZFS:** `zfs destroy` is only ever given `<dataset>@dsb-<stack>-<ts>`, one snapshot of
+  the one dataset holding the appdata root. Never `-r`, never a name without `@`.
+- **btrfs:** `delete` and `sweep` act only on entries of `SNAPSHOT_DIR` named
+  `dsb-<stack>-<ts>` that are real subvolumes (inode 256, not symlinks). `SNAPSHOT_DIR`
+  must be a root-owned directory with no group or other write, and not under the appdata
+  root.
+- `sweep` touches nothing that does not match the snapshot name shape.
+- `PATH` and `LC_ALL` are fixed inside the helper, because a root run with
+  `ELEVATION_CMD=none` inherits the caller's environment.
+- The tar helper's `--from-snapshot` takes a timestamp, not a path, and gets the path
+  from this helper's `source` verb.
+
+**Accepted:** the snapshot is of the whole subvolume or dataset that holds the appdata
+root (on forge, `@opt`), not of one stack's directory. It is read-only, lives in a
+root-only directory, and is deleted after the stack's archive. While it exists, it
+holds root-readable copies of everything in that subvolume, which root can read anyway.
+
+`tests/snapshot-helper.bats` runs each negative probe first against a naive helper, to
+show the probe fires, and then against the real helper, which must refuse it without
+running btrfs or zfs.
 
 ## Response Expectations
 

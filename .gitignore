@@ -5,3 +5,4 @@ coverage-exemptions.conf
 core.*
 *.core
 __pycache__/
+.scratch/

@@ -1,5 +1,74 @@
 # Changelog
 
+## [0.7.0] — 2026-10-22
+
+Per-stack backup tiers, snapshot-assisted backup and platform profiles: the parts that
+both backends use. Still tar-only; restic arrives in 0.8.0. Programme
+docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
+
+### Added
+
+- **Backup tiers (`x-backup`)**, declared in the stack's own compose file: `exclude`
+  (never backed up) and `weekly` (full run only), each entry with a required reason, plus
+  `retention` (validated; reserved for restic). An undeclared stack is backed up daily,
+  in full, as before. The block is read through `docker compose config --format json`
+  and validated by `dsb_status.py`. Paths are literal and relative, `[A-Za-z0-9._-]`
+  parts, no `.`/`..`/leading `-`. **An invalid block is ignored as a whole:** the stack
+  is backed up in full and reported as `config-error`. Declared paths go to tar anchored
+  and literal, after the global `EXCLUDE_PATTERNS`, whose unanchored glob meaning is
+  unchanged. See USAGE.md, "Backup tiers".
+- **Run kind:** `full` on `FULL_RUN_DAY` (1-7, default 7 = Sunday) or with `--full`, else
+  `daily`. 0.8.0's weekly tar keys off the same function.
+- **Snapshot-assisted backup** (`SNAPSHOT_BACKEND=none|auto|btrfs|zfs`, default `none`):
+  stop → read-only snapshot → start → archive from the snapshot → delete it. Downtime
+  becomes the snapshot time instead of the archive time, and the archive layout is
+  unchanged. A nested btrfs subvolume, ZFS child dataset, mountpoint, unreadable
+  directory, `snapdir=disabled` or any snapshot failure makes that stack fall back to
+  stop-archive-start, and it is never stopped twice. Leftover snapshots are swept at the
+  start of each run. See USAGE.md, "Snapshots".
+- **`docker-backup-snapshot.sh`**, a second root helper (verbs `info`, `check`, `create`,
+  `source`, `delete`, `sweep`). It takes no path from its caller: root-set constants
+  decide every path. The tar helper gains `--from-snapshot <ts>` (it asks the snapshot
+  helper for the path) and an anchored declared-path argument kind after `--`. See
+  ELEVATION.md and SECURITY.md.
+- **Platform profiles** (`PLATFORM=auto|debian|truenas`): defaults for `ELEVATION_CMD`
+  and `SNAPSHOT_BACKEND`, which explicit config always overrides. TrueNAS SCALE is
+  recognised by `midclt`, because its `/etc/os-release` says Debian (unverified on a real
+  host; part 6). OS_COMPATIBILITY.md documents the scheduler per platform.
+- **status.json** (schema 1, additive): run-level `run_kind`, `platform`,
+  `snapshot_backend`, `snapshot_note`. Per stack: `x_backup` and `snapshot`.
+  `coverage.xbackup_config_errors`. A rejected x-backup block makes `coverage.status`
+  `config-error`. `--coverage-report` shows each stack's `x_backup`.
+- **.prom:** `dsb_last_run_kind`, `dsb_stack_xbackup_paths{state}`,
+  `dsb_stack_xbackup_config_error`, `dsb_stack_snapshot_used`, `dsb_snapshot_fallbacks`.
+- The dry run prints the run kind, each stack's tiers with their reasons, the resolved
+  snapshot backend and each stack's snapshot plan.
+
+### Changed
+
+- The manual script applies the `exclude` tier (as a full run). It does not use
+  snapshots.
+- **Upgrade note:** with no `x-backup` declaration and no snapshot backend, the tar helper
+  gets exactly 0.6.0's arguments, so an installed 0.6.0 helper keeps working. Once a
+  stack declares paths or snapshots are on, install the 0.7.0 tar helper too; the old
+  one refuses the new arguments, and that stack's archive fails loudly.
+
+### Fixed
+
+- **#1186:** `LOCK_FILE` is no longer opened through a symlink or truncated on open. A
+  symlink or non-regular file is refused. The file is opened without `O_TRUNC`. The
+  opened fd's inode must match an `lstat` of the path (a swap in between is refused),
+  and the PID is written through the fd. A root run could previously be made to truncate
+  any file a symlink in `~/run` pointed at.
+- **STATUS.md example alert** `DockerStackBackupUncovered` added bare series to
+  `sum by (host)` results, which never match once `job`/`instance` labels exist, so the
+  alert could not fire. Every term is now aggregated, and it includes the x-backup
+  config-error gauge (p4 finding).
+- **Root helpers pin `LC_ALL=C`.** In a UTF-8 locale, bash's `[A-Za-z]` follows
+  collation and matched letters such as `é`. sudo keeps `LANG`/`LC_*` by default, so the
+  tar helper's stack-name check was locale-dependent. Found by the new path-rule parity
+  test.
+
 ## [0.6.0] — 2026-10-18
 
 Every run now says what it did in a machine-readable form, including what it did **not**

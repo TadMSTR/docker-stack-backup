@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.6.0"
+DSB_VERSION="0.7.0"
 
 #######################################
 # OS Detection
@@ -115,17 +115,49 @@ log_warning() {
 # File locking
 # Requires: LOCK_FILE, LOCK_FD to be set by caller
 #######################################
-acquire_lock() {
+# open_lock_file — opens LOCK_FILE on fd LOCK_FD, read-write, without truncating it and
+# without following a symlink (#1186). The lock dir is often the backup user's own
+# (~/run): with `exec 200>file`, a symlink planted there made a root run truncate its
+# target. So: refuse a symlink or a non-regular file, open with `<>` (O_CREAT, no
+# O_TRUNC), then check that the open fd and an lstat of the path name the same inode, so
+# a swap between the check and the open is refused too. The PID is written through the
+# fd's /proc link only after that check. Residual: a device node swapped in between the
+# lstat and the open still has its open handler run; the lock dir must not be writable by
+# anyone the backup user does not trust.
+open_lock_file() {
     [[ "${LOCK_FD:-200}" =~ ^[0-9]+$ ]] || LOCK_FD=200
-    eval "exec ${LOCK_FD:=200}>${LOCK_FILE:=/var/run/docker-stack-backup.lock}"
+    : "${LOCK_FD:=200}" "${LOCK_FILE:=/var/run/docker-stack-backup.lock}"
+    if [[ -L "$LOCK_FILE" ]]; then
+        log_error "Lock file is a symlink, refusing to open it: $LOCK_FILE"
+        return 1
+    fi
+    if [[ -e "$LOCK_FILE" && ! -f "$LOCK_FILE" ]]; then
+        log_error "Lock file is not a regular file, refusing to open it: $LOCK_FILE"
+        return 1
+    fi
+    # shellcheck disable=SC2016  # $LOCK_FILE is expanded by eval, as a quoted word
+    eval "exec $LOCK_FD"'<>"$LOCK_FILE"' || return 1
+    local path_id fd_id
+    path_id=$(stat -c '%d:%i' -- "$LOCK_FILE" 2>/dev/null) || path_id=""
+    fd_id=$(stat -L -c '%d:%i' -- "/proc/$$/fd/$LOCK_FD" 2>/dev/null) || fd_id=""
+    if [[ -z "$path_id" || "$path_id" != "$fd_id" ]]; then
+        eval "exec $LOCK_FD>&-"
+        log_error "Lock file was replaced while it was being opened, refusing it: $LOCK_FILE"
+        return 1
+    fi
+}
 
-    if ! flock -n $LOCK_FD; then
+acquire_lock() {
+    open_lock_file || exit 1
+
+    if ! flock -n "$LOCK_FD"; then
         log_error "Another backup is already running (lock file: $LOCK_FILE)"
         log_error "If you're sure no backup is running, remove: $LOCK_FILE"
         exit 1
     fi
 
-    echo $$ >&$LOCK_FD
+    # Through the fd's own /proc link: the inode just checked, truncated, then the PID.
+    printf '%s\n' "$$" > "/proc/$$/fd/$LOCK_FD" 2>/dev/null || true
     LOCK_HELD=true
     log "Lock acquired (PID: $$)"
 }
@@ -229,7 +261,88 @@ validate_numeric_config() {
     validate_uint MAX_RESTART_ATTEMPTS 1 100 || ok=1
     validate_uint RESTART_RETRY_DELAY 0 3600 || ok=1
     validate_uint PARALLEL_THREADS 0 1024 || ok=1
+    validate_uint FULL_RUN_DAY 1 7 || ok=1
     return $ok
+}
+
+#######################################
+# Run kind
+# full on FULL_RUN_DAY (1 = Monday … 7 = Sunday, `date +%u`) or with --full
+# (FORCE_FULL_RUN=true); daily otherwise. On a daily run the x-backup `weekly` paths are
+# left out (deferred); on a full run only the `exclude` paths are. The weekly tar (p5b)
+# keys off this same function: keep it the one place the rule lives.
+#######################################
+FULL_RUN_DAY="${FULL_RUN_DAY:-7}"
+
+resolve_run_kind() {
+    if [[ "${FORCE_FULL_RUN:-false}" == true || "$(date +%u)" == "${FULL_RUN_DAY:-7}" ]]; then
+        echo full
+    else
+        echo daily
+    fi
+}
+
+#######################################
+# Platform profiles
+# PLATFORM=auto|debian|truenas. A profile sets defaults only: a value set in config.sh
+# or the environment always wins. Call after detect_os and config.sh, before the
+# scripts' own ${VAR:-default} lines.
+#   debian:  ELEVATION_CMD=sudo (only when not root and ELEVATION_HELPER_PATH is set:
+#            otherwise the run stops at the privilege check, as before),
+#            SNAPSHOT_BACKEND=auto
+#   truenas: ELEVATION_CMD=none (runs as root), SNAPSHOT_BACKEND=zfs
+#   generic: no defaults (an OS neither profile recognises)
+# A snapshot backend that comes from a profile is a preference, not a demand: with no
+# usable snapshot helper it resolves to none (reported), where the same value set in
+# config.sh fails the preflight.
+# TrueNAS SCALE's /etc/os-release says ID=debian, so it is recognised by its middleware
+# client (midclt) or by detect_os's /etc/version check; see OS_COMPATIBILITY.md.
+#######################################
+detect_platform() {
+    if [[ "${OS_TYPE:-}" == truenas ]] || command -v midclt >/dev/null 2>&1; then
+        echo truenas
+    else
+        case "${OS_TYPE:-}" in
+            debian|ubuntu|proxmox) echo debian ;;
+            *) echo generic ;;
+        esac
+    fi
+}
+
+apply_platform_defaults() {
+    PLATFORM="${PLATFORM:-auto}"
+    PLATFORM_INVALID=false
+    case "$PLATFORM" in
+        auto)           RESOLVED_PLATFORM=$(detect_platform) ;;
+        debian|truenas) RESOLVED_PLATFORM="$PLATFORM" ;;
+        *)              RESOLVED_PLATFORM=generic; PLATFORM_INVALID=true ;;
+    esac
+    if [[ -n "${SNAPSHOT_BACKEND:-}" ]]; then
+        SNAPSHOT_BACKEND_SOURCE=config
+    else
+        SNAPSHOT_BACKEND_SOURCE=profile
+    fi
+    case "$RESOLVED_PLATFORM" in
+        debian)
+            if [[ -z "${ELEVATION_CMD:-}" && $EUID -ne 0 && -n "${ELEVATION_HELPER_PATH:-}" ]]; then
+                ELEVATION_CMD=sudo
+            fi
+            SNAPSHOT_BACKEND="${SNAPSHOT_BACKEND:-auto}"
+            ;;
+        truenas)
+            ELEVATION_CMD="${ELEVATION_CMD:-none}"
+            SNAPSHOT_BACKEND="${SNAPSHOT_BACKEND:-zfs}"
+            ;;
+    esac
+    SNAPSHOT_BACKEND="${SNAPSHOT_BACKEND:-none}"
+}
+
+# Logs and returns 1 for a PLATFORM value apply_platform_defaults did not recognise.
+validate_platform() {
+    if [[ "${PLATFORM_INVALID:-false}" == true ]]; then
+        log_error "PLATFORM must be auto, debian or truenas (got: '$(printable "$PLATFORM")')"
+        return 1
+    fi
 }
 
 #######################################
@@ -654,6 +767,148 @@ Check logs: ${LOG_FILE:-}"
 }
 
 #######################################
+# x-backup declared paths (USAGE.md "Backup tiers")
+# DECLARED_EXCLUDES holds this stack's paths to leave out of this run, relative to
+# $APPDATA_PATH/<stack>. dsb_status.py validated them; they are checked again here, and
+# again by the root helper, because they end up as tar arguments.
+#######################################
+DECLARED_EXCLUDES=()
+
+# valid_declared_path <path> — the same rule as dsb_status.py xb_path_error and the tar
+# helper: '/'-separated components of [A-Za-z0-9._-], none empty, '.', '..' or starting
+# with '-', at most 255 bytes, relative.
+valid_declared_path() {
+    local p="$1" c
+    local -a comps=()
+    # [A-Za-z] is ASCII only in the C locale: in en_US.UTF-8 it matches 'é' too.
+    local LC_ALL=C
+    # The whole string first: no glob, space or control byte ever reaches the split.
+    [[ "$p" =~ ^[A-Za-z0-9._/-]+$ && ${#p} -le 255 ]] || return 1
+    [[ "$p" != /* && "$p" != */ && "$p" != *//* ]] || return 1
+    IFS=/ read -r -a comps <<< "$p"
+    for c in "${comps[@]}"; do
+        [[ "$c" =~ ^[A-Za-z0-9._-]+$ && "$c" != -* && "$c" != . && "$c" != .. ]] || return 1
+    done
+    return 0
+}
+
+# read_xbackup <stack_path> <stack_name> <run_kind> <out_file> — fills DECLARED_EXCLUDES.
+# Any failure leaves it empty: the stack is backed up in full (a declaration may only
+# narrow a backup, and one that cannot be read narrows nothing). Diagnostics go to the
+# log. Requires: SCRIPT_DIR, APPDATA_PATH, LOG_FILE
+read_xbackup() {
+    local stack_path="$1" stack_name="$2" run_kind="$3" out="$4"
+    DECLARED_EXCLUDES=()
+    command -v python3 >/dev/null 2>&1 || return 0
+    local -a paths=()
+    local diag; diag=$(mktemp) || return 0
+    if ! mapfile -d '' -t paths < <(python3 -I "$SCRIPT_DIR/dsb_status.py" xbackup \
+            --stack-path "$stack_path" --appdata-dir "$APPDATA_PATH/$stack_name" \
+            --run-kind "$run_kind" --out "$out" 2>"$diag"); then
+        paths=()
+    fi
+    local line
+    while IFS= read -r line; do
+        log_warning "$stack_name: $line"
+    done < "$diag"
+    rm -f -- "$diag"
+    local p
+    for p in "${paths[@]+"${paths[@]}"}"; do
+        if ! valid_declared_path "$p"; then
+            log_error "$stack_name: x-backup reader returned an invalid path; backing up in full"
+            DECLARED_EXCLUDES=()
+            return 0
+        fi
+        DECLARED_EXCLUDES+=("$p")
+    done
+}
+
+#######################################
+# Snapshot-assisted backup (USAGE.md "Snapshots")
+# Every snapshot operation goes through the root-owned helper docker-backup-snapshot.sh,
+# whose own constants decide every path. The caller passes verbs, a stack name and the
+# run timestamp only. Called through ELEVATION_CMD, or directly when already root
+# (ELEVATION_CMD=none): one code path.
+# Requires: SNAPSHOT_HELPER_PATH, ELEVATION_CMD
+#######################################
+snapshot_helper() {
+    if [[ "${ELEVATION_CMD:-none}" == none ]]; then
+        "$SNAPSHOT_HELPER_PATH" "$@"
+    else
+        "$ELEVATION_CMD" "$SNAPSHOT_HELPER_PATH" "$@"
+    fi
+}
+
+# resolve_snapshot_backend — sets SNAPSHOT_RESOLVED (none|btrfs|zfs) and SNAPSHOT_NOTE
+# (why a requested backend resolved to none). Returns 1 only when SNAPSHOT_BACKEND was
+# set explicitly (config.sh / environment) to something unusable: that fails the
+# preflight. auto, and a backend that came from a platform profile, fall back to none.
+# Requires: SNAPSHOT_BACKEND, SNAPSHOT_BACKEND_SOURCE, APPDATA_PATH
+# shellcheck disable=SC2034  # SNAPSHOT_RESOLVED / SNAPSHOT_NOTE are read by the scripts
+resolve_snapshot_backend() {
+    SNAPSHOT_RESOLVED=none
+    SNAPSHOT_NOTE=""
+    local want="${SNAPSHOT_BACKEND:-none}" explicit=false
+    case "$want" in
+        none) return 0 ;;
+        auto) ;;
+        btrfs|zfs) [[ "${SNAPSHOT_BACKEND_SOURCE:-config}" == config ]] && explicit=true ;;
+        *)
+            log_error "SNAPSHOT_BACKEND must be none, auto, btrfs or zfs (got: '$(printable "$want")')"
+            return 1
+            ;;
+    esac
+    local fs; fs=$(stat -f -c %T -- "$APPDATA_PATH" 2>/dev/null) || fs=""
+    if [[ "$want" == auto ]]; then
+        case "$fs" in
+            btrfs|zfs) want="$fs" ;;
+            *)
+                SNAPSHOT_NOTE="auto: $APPDATA_PATH is on ${fs:-an unknown filesystem}, not btrfs or zfs"
+                return 0
+                ;;
+        esac
+    fi
+    local problem=""
+    if [[ "$fs" != "$want" ]]; then
+        problem="$APPDATA_PATH is on ${fs:-an unknown filesystem}, not $want"
+    elif [[ -z "${SNAPSHOT_HELPER_PATH:-}" ]]; then
+        problem="SNAPSHOT_HELPER_PATH is not set"
+    elif [[ ! -f "$SNAPSHOT_HELPER_PATH" ]]; then
+        problem="SNAPSHOT_HELPER_PATH not found: $SNAPSHOT_HELPER_PATH"
+    else
+        local info="" key val h_backend="" h_appdata=""
+        if info=$(snapshot_helper info 2>>"${LOG_FILE:-/dev/null}"); then
+            while IFS='=' read -r key val; do
+                case "$key" in
+                    backend) h_backend="$val" ;;
+                    appdata) h_appdata="$val" ;;
+                esac
+            done <<< "$info"
+            if [[ "$h_backend" != "$want" ]]; then
+                problem="the snapshot helper is set up for '$h_backend', not $want"
+            elif [[ "$h_appdata" != "$APPDATA_PATH" ]]; then
+                problem="the snapshot helper's ALLOWED_APPDATA_PATH ($h_appdata) is not APPDATA_PATH"
+            fi
+        else
+            problem="the snapshot helper's 'info' check failed (see $LOG_FILE)"
+        fi
+    fi
+    if [[ -n "$problem" ]]; then
+        if [[ "$explicit" == true ]]; then
+            log_error "SNAPSHOT_BACKEND=$want: $problem"
+            return 1
+        fi
+        SNAPSHOT_NOTE="$want: $problem"
+        return 0
+    fi
+    SNAPSHOT_RESOLVED="$want"
+}
+
+# The run timestamp of the snapshot the next archive is made from (empty: archive the
+# live appdata). Set by backup_stack around create_archive_atomic only.
+ARCHIVE_SNAPSHOT_TS=""
+
+#######################################
 # Compression functions
 # Requires: COMPRESSION_METHOD, COMPRESSION_LEVEL, USE_PARALLEL, PARALLEL_THREADS, EXCLUDE_PATTERNS
 #######################################
@@ -717,10 +972,40 @@ create_compressed_archive() {
 
     setup_compression_environment
 
+    # Global EXCLUDE_PATTERNS first, in tar's default (unanchored, wildcard) mode, exactly
+    # as before; declared paths after them. --anchored/--no-wildcards are positional:
+    # they change only the --exclude options that follow, so put the other way round they
+    # would turn the global globs anchored too (tests/xbackup-tar.bats).
     local exclude_args=()
     for pattern in "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}"; do
         exclude_args+=(--exclude="$pattern")
     done
+    if [[ ${#DECLARED_EXCLUDES[@]} -gt 0 || -n "$ARCHIVE_SNAPSHOT_TS" ]]; then
+        if ! standard_layout "${tar_args[@]}"; then
+            log_error "Declared excludes and snapshots need the standard layout: -C <temp_dir> . -C <appdata_path> <stack_name>"
+            return 1
+        fi
+    fi
+    if [[ ${#DECLARED_EXCLUDES[@]} -gt 0 ]]; then
+        exclude_args+=(--anchored --no-wildcards)
+        local p
+        for p in "${DECLARED_EXCLUDES[@]}"; do
+            valid_declared_path "$p" || { log_error "Invalid declared path refused"; return 1; }
+            exclude_args+=(--exclude="${tar_args[5]}/$p")
+        done
+    fi
+    if [[ -n "$ARCHIVE_SNAPSHOT_TS" ]]; then
+        # Root (ELEVATION_CMD=none) reads the snapshot itself; the helper says where.
+        local src; src=$(snapshot_helper source "${tar_args[5]}" "$ARCHIVE_SNAPSHOT_TS") || {
+            log_error "Snapshot helper could not resolve the snapshot of ${tar_args[5]}"
+            return 1
+        }
+        if [[ "$src" != /* || ! -d "$src/${tar_args[5]}" ]]; then
+            log_error "Snapshot source for ${tar_args[5]} is not a directory"
+            return 1
+        fi
+        tar_args[4]="$src"
+    fi
 
     if [[ "${USE_PARALLEL:-false}" == true ]]; then
         local compressor=""
@@ -843,7 +1128,7 @@ create_compressed_archive_elevated() {
     # The helper only accepts the fixed archive layout this project produces:
     #   -C <temp_dir> . -C <appdata_path> <stack_name>
     # Fail closed on anything else rather than mis-invoking a privileged command.
-    if [[ ${#tar_args[@]} -ne 6 || "${tar_args[0]}" != "-C" || "${tar_args[2]}" != "." || "${tar_args[3]}" != "-C" ]]; then
+    if ! standard_layout "${tar_args[@]}"; then
         log_error "Elevated archive creation requires the standard layout: -C <temp_dir> . -C <appdata_path> <stack_name>"
         return 1
     fi
@@ -852,9 +1137,27 @@ create_compressed_archive_elevated() {
     local appdata_path="${tar_args[4]}"
     local stack_name="${tar_args[5]}"
 
+    # With no snapshot and no declared path, the argument list is exactly 0.6.0's, so a
+    # 0.6.0 helper keeps working until it is updated (CHANGELOG 0.7.0).
+    local -a extra=() declared=()
+    [[ -n "$ARCHIVE_SNAPSHOT_TS" ]] && extra=(--from-snapshot "$ARCHIVE_SNAPSHOT_TS")
+    local p
+    for p in "${DECLARED_EXCLUDES[@]+"${DECLARED_EXCLUDES[@]}"}"; do
+        valid_declared_path "$p" || { log_error "Invalid declared path refused"; return 1; }
+        declared+=("$stack_name/$p")
+    done
+    [[ ${#declared[@]} -gt 0 ]] && declared=(-- "${declared[@]}")
+
     "$ELEVATION_CMD" "$ELEVATION_HELPER_PATH" \
         "${COMPRESSION_METHOD:-none}" "$temp_dir" "$appdata_path" "$stack_name" \
-        "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}" > "$output_file"
+        "${extra[@]+"${extra[@]}"}" \
+        "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}" \
+        "${declared[@]+"${declared[@]}"}" > "$output_file"
+}
+
+# standard_layout <tar args> — 0 if they are exactly -C <dir> . -C <dir> <stack_name>.
+standard_layout() {
+    [[ $# -eq 6 && "$1" == "-C" && "$3" == "." && "$4" == "-C" ]]
 }
 
 #######################################

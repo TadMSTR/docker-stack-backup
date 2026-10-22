@@ -13,6 +13,10 @@ Commands:
       and the .prom file. Prints a one-line summary on stdout; diagnostics on stderr.
   coverage-report --stack-base ... --appdata ... <stack-name>...
       Print the coverage classifier's JSON for the named stacks. Writes nothing.
+  xbackup --stack-path ... --appdata-dir ... --run-kind daily|full --out FILE
+      Read and validate the stack's `x-backup` block (USAGE.md). Writes the per-stack
+      x_backup record to FILE and prints the paths to exclude this run on stdout,
+      NUL-terminated. An invalid block prints nothing: the stack is backed up in full.
 
 Everything this reads back from the backup share (the previous status.json) or from an
 operator file (the exemptions file) is data. It is parsed here, validated, and never
@@ -53,6 +57,23 @@ SYSTEM_PATHS = (
     "/lib/modules",
 )
 EXEMPTION_KINDS = ("stack", "mount", "appdata")
+RUN_KINDS = ("daily", "full")
+SNAPSHOT_BACKENDS = ("none", "btrfs", "zfs")
+# Why a stack with a snapshot backend was archived the old way (stop-archive-start).
+FALLBACK_REASONS = (
+    "nested-subvolume", "nested-dataset", "mountpoint", "snapdir-disabled",
+    "check-failed", "create-failed", "source-failed",
+)
+PLATFORMS = ("debian", "truenas", "generic")
+
+# x-backup limits (USAGE.md "Backup tiers").
+XB_LISTS = ("exclude", "weekly")
+XB_KEYS = XB_LISTS + ("retention",)
+XB_RETENTION_KEYS = ("daily", "weekly", "monthly")
+XB_MAX_ENTRIES = 64
+XB_MAX_PATH = 255
+XB_MAX_REASON = 200
+XB_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
 
 # Carry-forward guards. 2020-01-01T00:00:00Z is the floor; now + 1 day the ceiling.
 TS_FLOOR = 1577836800
@@ -122,10 +143,17 @@ def roots_of(path):
 # record
 #######################################
 def cmd_record(argv):
-    if len(argv) != 10:
+    if len(argv) < 10:
         diag("record: expected 10 arguments")
         return 2
-    path, name, result, reason, mode, archive, nbytes, started, finished, downtime = argv
+    path, name, result, reason, mode, archive, nbytes, started, finished, downtime = argv[:10]
+    ap = argparse.ArgumentParser(prog="dsb_status.py record")
+    ap.add_argument("--xbackup", default=None)
+    ap.add_argument("--snapshot-backend", default="")
+    ap.add_argument("--snapshot-used", default="")
+    ap.add_argument("--snapshot-fallback", default="")
+    ap.add_argument("--snapshot-s", default="")
+    opts = ap.parse_args(argv[10:])
     rec = {
         "name": clean(name),
         "result": result if result in RESULTS else "failed",
@@ -136,7 +164,17 @@ def cmd_record(argv):
         "started": opt_int(started),
         "finished": opt_int(finished),
         "downtime_s": opt_int(downtime),
+        "x_backup": None if opts.xbackup is None else read_xbackup_result(opts.xbackup),
+        "snapshot": None,
     }
+    if opts.snapshot_backend in SNAPSHOT_BACKENDS and opts.snapshot_backend != "none":
+        fb = opts.snapshot_fallback
+        rec["snapshot"] = {
+            "backend": opts.snapshot_backend,
+            "used": opts.snapshot_used == "1",
+            "fallback_reason": fb if fb in FALLBACK_REASONS else (None if not fb else "unknown"),
+            "snapshot_s": opt_int(opts.snapshot_s),
+        }
     line = json.dumps(rec, ensure_ascii=True) + "\n"
     with open(path, "a", encoding="ascii") as f:
         f.write(line)
@@ -291,6 +329,215 @@ def compose_config(stack_path):
     return cfg, None
 
 
+#######################################
+# x-backup: per-stack backup tiers (USAGE.md "Backup tiers")
+#######################################
+def xb_path_error(p):
+    """None if p is a valid declared path, else why not. The value itself is never put
+    in the message: it may be long or hold control bytes."""
+    if not isinstance(p, str):
+        return "must be a string"
+    if not p:
+        return "is empty"
+    if len(p.encode("utf-8", "surrogateescape")) > XB_MAX_PATH:
+        return "is longer than %d bytes" % XB_MAX_PATH
+    if p.startswith("/"):
+        return "must be relative to the stack's appdata dir (leading '/')"
+    for c in p.split("/"):
+        if not c:
+            return "has an empty component ('//' or a trailing '/')"
+        if c in (".", ".."):
+            return "has a '.' or '..' component"
+        if c.startswith("-"):
+            return "has a component starting with '-'"
+        if not XB_COMPONENT.fullmatch(c):
+            return "may only use A-Z a-z 0-9 . _ - and '/' (no globs, no spaces)"
+    return None
+
+
+def xb_reason_error(r):
+    if not isinstance(r, str):
+        return "must be a string"
+    if not r.strip():
+        return "is empty"
+    if len(r) > XB_MAX_REASON:
+        return "is longer than %d characters" % XB_MAX_REASON
+    if CONTROL.search(r):
+        return "has a control character"
+    return None
+
+
+def parse_xbackup(block):
+    """(declarations, retention, errors). declarations: [(tier, path, reason)]. Any
+    error makes the whole block void: the caller backs the stack up in full."""
+    errors = []
+    decls = []
+    retention = None
+    if not isinstance(block, dict):
+        return [], None, ["x-backup must be a mapping"]
+    for k in block:
+        if k not in XB_KEYS:
+            errors.append("x-backup: unknown key %r" % printable(k)[:40])
+    seen = {}
+    for tier in XB_LISTS:
+        if tier not in block:
+            continue
+        entries = block[tier]
+        if not isinstance(entries, list):
+            errors.append("x-backup.%s must be a list" % tier)
+            continue
+        if len(entries) > XB_MAX_ENTRIES:
+            errors.append("x-backup.%s has more than %d entries" % (tier, XB_MAX_ENTRIES))
+            continue
+        for n, e in enumerate(entries):
+            where = "x-backup.%s[%d]" % (tier, n)
+            if not isinstance(e, dict):
+                errors.append("%s must be a mapping with path and reason" % where)
+                continue
+            for k in e:
+                if k not in ("path", "reason"):
+                    errors.append("%s: unknown key %r" % (where, printable(k)[:40]))
+            if "path" not in e or "reason" not in e:
+                errors.append("%s needs both path and reason" % where)
+                continue
+            perr = xb_path_error(e["path"])
+            if perr:
+                errors.append("%s.path %s" % (where, perr))
+            rerr = xb_reason_error(e["reason"])
+            if rerr:
+                errors.append("%s.reason %s" % (where, rerr))
+            if perr or rerr:
+                continue
+            if e["path"] in seen:
+                errors.append("%s.path is also declared in x-backup.%s" % (where, seen[e["path"]]))
+                continue
+            seen[e["path"]] = tier
+            decls.append((tier, e["path"], e["reason"]))
+    if "retention" in block:
+        r = block["retention"]
+        if not isinstance(r, dict):
+            errors.append("x-backup.retention must be a mapping")
+        else:
+            retention = {}
+            for k, v in r.items():
+                if k not in XB_RETENTION_KEYS:
+                    errors.append("x-backup.retention: unknown key %r" % printable(k)[:40])
+                elif type(v) is not int or not 0 <= v <= 1000:
+                    errors.append("x-backup.retention.%s must be an integer 0-1000" % k)
+                else:
+                    retention[k] = v
+    if errors:
+        return [], None, errors
+    return decls, retention, []
+
+
+def path_exists(stack_dir, rel):
+    """True/False, or None when it cannot be told (an unreadable dir on the way)."""
+    try:
+        os.lstat(os.path.join(stack_dir, rel))
+        return True
+    except FileNotFoundError:
+        return False
+    except NotADirectoryError:
+        return False
+    except OSError:
+        return None
+
+
+def xbackup_for(cfg, cfg_err, stack_dir, run_kind):
+    """The per-stack x_backup record and the paths to exclude this run.
+    cfg is the `docker compose config` dict, or None with cfg_err set."""
+    doc = {"status": "none", "errors": [], "run_kind": run_kind, "excluded": [],
+           "stale": [], "retention": None}
+    if cfg is None:
+        doc["status"] = "unknown"
+        doc["errors"] = [printable(cfg_err or "docker compose config failed")]
+        return doc, []
+    if "x-backup" not in cfg:
+        return doc, []
+    decls, retention, errors = parse_xbackup(cfg["x-backup"])
+    if errors:
+        doc["status"] = "config-error"
+        doc["errors"] = errors
+        return doc, []
+    doc["status"] = "ok"
+    doc["retention"] = retention
+    paths = []
+    for tier, path, reason in decls:
+        exists = path_exists(stack_dir, path)
+        if exists is False:
+            doc["stale"].append(path)
+        if tier == "exclude":
+            action = "excluded"
+        elif run_kind == "daily":
+            action = "deferred"
+        else:
+            continue   # a weekly path on the full run is backed up
+        doc["excluded"].append({"path": path, "reason": clean(reason), "tier": tier,
+                                "action": action, "exists": exists})
+        paths.append(path)
+    return doc, paths
+
+
+def read_xbackup_result(path):
+    """The x_backup record xbackup wrote for this stack (our own file, in the run's
+    private temp dir). Missing or unreadable: the reader failed, so the stack was backed
+    up in full; say so rather than report "none"."""
+    try:
+        with open(path, "rb") as f:
+            doc = json.loads(f.read(1024 * 1024))
+        if isinstance(doc, dict) and doc.get("status") in ("none", "ok", "config-error", "unknown"):
+            return doc
+    except (OSError, ValueError):
+        pass
+    return {"status": "unknown", "errors": ["x-backup reader failed; backed up in full"],
+            "run_kind": None, "excluded": [], "stale": [], "retention": None}
+
+
+def cmd_xbackup(argv):
+    ap = argparse.ArgumentParser(prog="dsb_status.py xbackup")
+    ap.add_argument("--stack-path", required=True)
+    ap.add_argument("--appdata-dir", required=True)
+    ap.add_argument("--run-kind", required=True, choices=RUN_KINDS)
+    ap.add_argument("--out", required=True)
+    a = ap.parse_args(argv)
+    cfg, err = compose_config(a.stack_path)
+    doc, paths = xbackup_for(cfg, err, a.appdata_dir, a.run_kind)
+    for e in doc["errors"]:
+        diag("x-backup: %s" % e)
+    with open(a.out, "w", encoding="ascii") as f:
+        f.write(json.dumps(doc, ensure_ascii=True))
+    out = sys.stdout.buffer
+    for p in paths:
+        out.write(p.encode("ascii") + b"\0")
+    out.flush()
+    return 0
+
+
+def cmd_xbackup_describe(argv):
+    """Human-readable lines for the dry run, from an xbackup result file."""
+    if len(argv) != 1:
+        diag("xbackup-describe: expected 1 argument")
+        return 2
+    doc = read_xbackup_result(argv[0])
+    st = doc["status"]
+    if st == "none":
+        print("x-backup: none (backed up in full)")
+    elif st == "ok":
+        print("x-backup: ok (%s run)" % doc.get("run_kind"))
+        for e in doc["excluded"]:
+            print("  %s: %s — %s" % (e["action"], e["path"], printable(e["reason"])))
+        for p in doc["stale"]:
+            print("  stale (path does not exist): %s" % p)
+        if not doc["excluded"]:
+            print("  nothing left out this run")
+    else:
+        print("x-backup: %s — backed up in full" % st)
+        for e in doc["errors"]:
+            print("  %s" % printable(e))
+    return 0
+
+
 def classify_mount(m, ctx):
     """One service mount -> item dict (without service/exempt)."""
     mtype = m.get("type")
@@ -345,13 +592,18 @@ def classify_mount(m, ctx):
     return item
 
 
-def classify_stack(stack_base, name, appdata_roots, system_paths, backed_up, known_stacks):
+def classify_stack(stack_base, name, appdata_roots, system_paths, backed_up, known_stacks,
+                   run_kind=None, appdata=None):
     """Coverage of one stack. backed_up: set of stacks backed up this run, or None in
-    report mode (no run happened)."""
+    report mode (no run happened). With run_kind (report mode), the stack's x_backup
+    record rides along under the "x_backup" key; finalize takes the one the run applied."""
     stack_path = os.path.join(stack_base, name)
     cfg, err = compose_config(stack_path)
+    xb = None
+    if run_kind is not None:
+        xb, _ = xbackup_for(cfg, err, os.path.join(appdata, name), run_kind)
     if cfg is None:
-        return {"status": "unknown", "error": err, "items": []}
+        return {"status": "unknown", "error": err, "items": [], "x_backup": xb}
     ctx = {
         "stack": name,
         "stack_path": stack_path,
@@ -386,7 +638,7 @@ def classify_stack(stack_base, name, appdata_roots, system_paths, backed_up, kno
                 item["alerting"] = False
             item["exempt"] = None
             items.append(item)
-    return {"status": "ok", "error": None, "items": items}
+    return {"status": "ok", "error": None, "items": items, "x_backup": xb}
 
 
 def unowned_appdata(appdata, known_stacks):
@@ -438,7 +690,8 @@ def finish_stack_status(cov):
         cov["status"] = "uncovered"
 
 
-def coverage_for(names, stack_base, appdata, ignore_paths, exemptions_file, backed_up):
+def coverage_for(names, stack_base, appdata, ignore_paths, exemptions_file, backed_up,
+                 run_kind=None):
     appdata_roots = roots_of(appdata)
     system_paths = list(SYSTEM_PATHS)
     for p in (ignore_paths or "").split(":"):
@@ -447,8 +700,13 @@ def coverage_for(names, stack_base, appdata, ignore_paths, exemptions_file, back
     known = set(names)
     per_stack = []
     for name in names:
-        per_stack.append({"name": name, "coverage": classify_stack(
-            stack_base, name, appdata_roots, system_paths, backed_up, known)})
+        cov = classify_stack(stack_base, name, appdata_roots, system_paths, backed_up, known,
+                             run_kind, appdata)
+        xb = cov.pop("x_backup")
+        entry = {"name": name, "coverage": cov}
+        if run_kind is not None:
+            entry["x_backup"] = xb
+        per_stack.append(entry)
     unowned, unowned_error = unowned_appdata(appdata, known)
     entries, ex_status, ex_errors = load_exemptions(exemptions_file)
     apply_exemptions(entries, per_stack, unowned)
@@ -470,7 +728,9 @@ def coverage_for(names, stack_base, appdata, ignore_paths, exemptions_file, back
     return per_stack, unowned, exemptions
 
 
-def coverage_summary(per_stack, unowned, exemptions):
+def coverage_summary(per_stack, unowned, exemptions, xbackup_errors=0):
+    """xbackup_errors: stacks whose x-backup block was rejected (each was backed up in
+    full). It outranks every other state, like an exemptions config error."""
     by_class = {}
     uncovered_items = 0
     stacks_uncovered = 0
@@ -487,7 +747,7 @@ def coverage_summary(per_stack, unowned, exemptions):
                 uncovered_items += 1
     unowned_unexempt = sum(1 for u in unowned if u["exempt"] is None)
     unowned_error = exemptions.get("unowned_appdata_error")
-    if exemptions["status"] == "config-error":
+    if exemptions["status"] == "config-error" or xbackup_errors:
         status = "config-error"
     elif stacks_unknown or unowned_error:
         status = "unknown"
@@ -500,6 +760,7 @@ def coverage_summary(per_stack, unowned, exemptions):
             "unowned_appdata": len(unowned), "unowned_appdata_unexempt": unowned_unexempt,
             "unowned_appdata_status": "unknown" if unowned_error else "ok",
             "unowned_appdata_error": unowned_error,
+            "xbackup_config_errors": xbackup_errors,
             "by_class": dict(sorted(by_class.items()))}
 
 
@@ -704,6 +965,11 @@ def build_prom(doc):
     for r in RESULTS:
         p.add("dsb_stacks", "Stacks by result in the last run.", dict(h, result=r),
               doc["counts"][r])
+    if doc.get("run_kind") in RUN_KINDS:
+        for k in RUN_KINDS:
+            p.add("dsb_last_run_kind", "Kind of the last run (daily or full), one-hot.",
+                  dict(h, kind=k), 1 if doc["run_kind"] == k else 0)
+    fallbacks = 0
 
     invalid = 0
     for s in doc["stacks"]:
@@ -735,6 +1001,31 @@ def build_prom(doc):
             p.add("dsb_coverage_unknown",
                   "1 if docker compose config failed, so coverage is unknown.", st,
                   1 if cov["status"] == "unknown" else 0)
+        xb = s.get("x_backup")
+        if isinstance(xb, dict):
+            n = {"excluded": 0, "deferred": 0}
+            for e in xb.get("excluded") or []:
+                if e.get("action") in n:
+                    n[e["action"]] += 1
+            n["stale"] = len(xb.get("stale") or [])
+            for state in ("excluded", "deferred", "stale"):
+                p.add("dsb_stack_xbackup_paths",
+                      "Declared x-backup paths: excluded, deferred (weekly tier on a daily run), stale (missing).",
+                      dict(st, state=state), n[state])
+            p.add("dsb_stack_xbackup_config_error",
+                  "1 if the stack's x-backup block was rejected (backed up in full).", st,
+                  1 if xb.get("status") == "config-error" else 0, merge="max")
+        snap = s.get("snapshot")
+        if isinstance(snap, dict):
+            p.add("dsb_stack_snapshot_used",
+                  "1 if the stack was archived from a snapshot in the last run.", st,
+                  1 if snap.get("used") else 0, merge="min")
+            if snap.get("fallback_reason"):
+                fallbacks += 1
+    if doc.get("snapshot_backend") in SNAPSHOT_BACKENDS and doc["snapshot_backend"] != "none":
+        p.add("dsb_snapshot_fallbacks",
+              "Stacks archived the old way (stop-archive-start) although a snapshot backend is set.",
+              h, fallbacks)
     for name, ts in sorted(doc["stack_last_success"].items()):
         p.add("dsb_stack_last_success_timestamp_seconds",
               "Last successful backup of the stack (Unix time), carried forward.",
@@ -777,6 +1068,10 @@ def cmd_finalize(argv):
     ap.add_argument("--started", required=True)
     ap.add_argument("--dest", default="")
     ap.add_argument("--aborted", default="")
+    ap.add_argument("--run-kind", default="")
+    ap.add_argument("--platform", default="")
+    ap.add_argument("--snapshot-backend", default="")
+    ap.add_argument("--snapshot-note", default="")
     a = ap.parse_args(argv)
 
     now = int(time.time())
@@ -823,7 +1118,10 @@ def cmd_finalize(argv):
             "started": r.get("started"), "finished": r.get("finished"),
             "downtime_s": r.get("downtime_s"), "last_success": ls,
             "coverage": cov_by_name.get(r["name"]),
+            "x_backup": r.get("x_backup"), "snapshot": r.get("snapshot"),
         })
+    xbackup_errors = sum(1 for s in stacks
+                         if isinstance(s["x_backup"], dict) and s["x_backup"].get("status") == "config-error")
     if aborted:
         # The loop did not run (or did not finish): keep every stack's carried history,
         # or one aborted night would erase it.
@@ -845,6 +1143,10 @@ def cmd_finalize(argv):
         "started": started, "finished": now,
         "duration_s": (now - started) if started is not None else None,
         "outcome": outcome, "abort_reason": aborted,
+        "run_kind": a.run_kind if a.run_kind in RUN_KINDS else None,
+        "platform": a.platform if a.platform in PLATFORMS else None,
+        "snapshot_backend": a.snapshot_backend if a.snapshot_backend in SNAPSHOT_BACKENDS else None,
+        "snapshot_note": printable(a.snapshot_note)[:200] or None,
         "counts": counts,
         "bytes_total": sum(s["bytes"] or 0 for s in stacks if s["result"] == "backed_up"),
         "dest": {"path": clean(a.dest), "free_bytes": free},
@@ -853,7 +1155,8 @@ def cmd_finalize(argv):
         "stacks": stacks,
         "unowned_appdata": unowned,
         "exemptions": exemptions,
-        "coverage": coverage_summary(per_stack, unowned, exemptions) if exemptions else None,
+        "coverage": (coverage_summary(per_stack, unowned, exemptions, xbackup_errors)
+                     if exemptions else None),
     }
 
     rc = 0
@@ -889,6 +1192,9 @@ def cmd_finalize(argv):
               % (cov["status"], cov["uncovered_items"], cov["stacks_unknown"],
                  cov["unowned_appdata"], cov["unowned_appdata_unexempt"],
                  len(exemptions["stale"])))
+        if xbackup_errors:
+            print("x-backup: %d stack(s) with an invalid x-backup block, backed up in full"
+                  % xbackup_errors)
     return rc
 
 
@@ -901,15 +1207,17 @@ def cmd_coverage_report(argv):
     ap.add_argument("--appdata", required=True)
     ap.add_argument("--exemptions", default="")
     ap.add_argument("--ignore-paths", default="")
+    ap.add_argument("--run-kind", default="daily", choices=RUN_KINDS)
     ap.add_argument("stacks", nargs="*")
     a = ap.parse_args(argv)
     names = [clean(n) for n in a.stacks]
     per_stack, unowned, exemptions = coverage_for(
-        names, a.stack_base, a.appdata, a.ignore_paths, a.exemptions, None)
+        names, a.stack_base, a.appdata, a.ignore_paths, a.exemptions, None, a.run_kind)
+    xbackup_errors = sum(1 for s in per_stack if s["x_backup"]["status"] == "config-error")
     doc = {"schema": SCHEMA, "tool": TOOL, "stack_base": clean(a.stack_base),
-           "appdata": clean(a.appdata), "stacks": per_stack, "unowned_appdata": unowned,
-           "exemptions": exemptions,
-           "summary": coverage_summary(per_stack, unowned, exemptions)}
+           "appdata": clean(a.appdata), "run_kind": a.run_kind, "stacks": per_stack,
+           "unowned_appdata": unowned, "exemptions": exemptions,
+           "summary": coverage_summary(per_stack, unowned, exemptions, xbackup_errors)}
     json.dump(doc, sys.stdout, indent=1, ensure_ascii=True)
     sys.stdout.write("\n")
     return 0
@@ -917,7 +1225,7 @@ def cmd_coverage_report(argv):
 
 def main():
     if len(sys.argv) < 2:
-        diag("usage: dsb_status.py record|finalize|coverage-report ...")
+        diag("usage: dsb_status.py record|finalize|coverage-report|xbackup ...")
         return 2
     cmd, rest = sys.argv[1], sys.argv[2:]
     if cmd == "record":
@@ -926,6 +1234,10 @@ def main():
         return cmd_finalize(rest)
     if cmd == "coverage-report":
         return cmd_coverage_report(rest)
+    if cmd == "xbackup":
+        return cmd_xbackup(rest)
+    if cmd == "xbackup-describe":
+        return cmd_xbackup_describe(rest)
     diag("unknown command")
     return 2
 

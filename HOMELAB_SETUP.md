@@ -210,6 +210,19 @@ BACKUP_DEST="/mnt/datastor/backups/docker-backups"  # Local
 COMPRESSION_METHOD="none"           # ZFS LZ4 already enabled
 ```
 
+### Scheduler and install, per platform (0.7.0)
+
+| | Debian (forge, argus) | TrueNAS SCALE (atlas) |
+|---|---|---|
+| Profile | `PLATFORM=auto` → `debian` | `PLATFORM=auto` → `truenas` (or set it explicitly; see OS_COMPATIBILITY.md) |
+| Runs as | an unprivileged user with `ELEVATION_CMD=sudo` | root, `ELEVATION_CMD=none` |
+| Helpers | `/usr/local/sbin/docker-backup-tar-create.sh` and `docker-backup-snapshot.sh`, root 0750, one sudoers line (ELEVATION.md) | the snapshot helper only (as root the script runs tar itself), root-owned, on the data pool; no sudoers |
+| Snapshots | btrfs (`SNAPSHOT_BACKEND=btrfs` or `auto`); forge snapshots `@opt` into `/opt/.dsb-snapshots` | ZFS (`zfs`); the dataset holding `APPDATA_PATH`, read through `.zfs/snapshot` |
+| Scheduler | `/etc/cron.d/docker-stack-backup` (02:00 backup, 03:30 cleanup) | System Settings → Advanced → Cron Jobs (`/etc` does not survive upgrades) |
+
+These are docs only: there is no installer. Programme part 5c installs forge, and part 6
+installs argus and atlas.
+
 ### Unraid - Planned Config
 ```bash
 DOCKHAND_BASE="/path/to/dockhand"  # TBD

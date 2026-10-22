@@ -85,9 +85,9 @@ sudo docker-stack-backup-manual.sh
 
 ## Documentation
 
-- **[Installation & Usage Guide](USAGE.md)** - Detailed setup and usage instructions
+- **[Installation & Usage Guide](USAGE.md)** - Detailed setup and usage instructions, including per-stack [backup tiers (`x-backup`)](USAGE.md#backup-tiers-x-backup) and [snapshot-assisted backup](USAGE.md#snapshots) on btrfs/ZFS
 - **[Notification Setup](NOTIFICATIONS.md)** - Configure Ntfy, Pushover, Email, or Matrix alerts
-- **[Privileged Archive Creation](ELEVATION.md)** - Back up root-owned appdata unprivileged, or write to an NFS `root_squash` export, via a validated elevation helper
+- **[Privileged Archive Creation](ELEVATION.md)** - Back up root-owned appdata unprivileged, or write to an NFS `root_squash` export, via a validated elevation helper; the snapshot helper
 - **[Post-Restart Hooks](HOOKS.md)** - Run custom fixups after each stack's containers restart
 - **[Compression Configuration](COMPRESSION.md)** - Compression methods, levels, and parallel processing
 - **[Dry-Run Mode](DRY_RUN.md)** - Simulate backups without making changes
