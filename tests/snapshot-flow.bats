@@ -165,6 +165,11 @@ snapshots_left() {
     [[ "$output" == *"Could not delete snapshot dsb-$STACK-"*"the next run's sweep removes it"* ]]
     [ "$(js "$STATUS" 'd["stacks"][0]["result"]')" = '"backed_up"' ]
     [ "$(snapshots_left)" -eq 1 ]
+    # Not only a log line (baseline OV-01): status, .prom and the summary say so.
+    [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["delete_failed"]')" = true ]
+    [ "$(js "$STATUS" 'd["snapshot_cleanup"]')" = '{"failed": 1, "swept": 0}' ]
+    grep -qx "dsb_snapshot_cleanup_failures{host=\"$HOST\"} 1" "$PROM"
+    [[ "$output" == *"Snapshot cleanup failed: 1"* ]]
     local left; left=$(basename "$(find "$SNAP_VOL/.dsb-snapshots" -mindepth 1 -maxdepth 1)")
     unset STUB_SNAP_DELETE_RC
     sleep 1   # a new run timestamp
@@ -172,6 +177,26 @@ snapshots_left() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"Removed leftover snapshot: $left"* ]]
     [ "$(snapshots_left)" -eq 0 ]
+    [ "$(js "$STATUS" 'd["snapshot_cleanup"]')" = '{"failed": 0, "swept": 1}' ]
+    grep -qx "dsb_snapshot_leftovers_swept{host=\"$HOST\"} 1" "$PROM"
+    grep -qx "dsb_snapshot_cleanup_failures{host=\"$HOST\"} 0" "$PROM"
+}
+
+@test "a failed sweep counts as a cleanup failure, and the run goes on" {
+    export STUB_SNAP_DELETE_RC=1
+    run_backup                     # leaves one snapshot behind
+    sleep 1
+    run_backup                     # its sweep fails on it, and its own delete fails
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Snapshot sweep did not finish"* ]]
+    [ "$(js "$STATUS" 'd["snapshot_cleanup"]["failed"]')" = 2 ]
+    [ "$(js "$STATUS" 'd["outcome"]')" = '"success"' ]
+}
+
+@test "an unsupported ELEVATION_CMD never reaches the snapshot helper" {
+    export ELEVATION_CMD=pkexec
+    run_backup
+    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG"
 }
 
 @test "two signals during the archive: exit at once, and the snapshot is still deleted" {

@@ -125,19 +125,24 @@ fi
 snap_name() { printf 'dsb-%s-%s' "$1" "$2"; }
 
 # The snapshot dir must be a real directory owned by whoever runs this (root), with no
-# group or other write: a planted symlink or a writable dir would let another user steer
-# what `delete`/`sweep` act on.
-prepare_snapshot_dir() {
-    if [[ ! -e "$SNAPSHOT_DIR" && ! -L "$SNAPSHOT_DIR" ]]; then
-        mkdir -m 0700 -- "$SNAPSHOT_DIR" || fail "cannot create $SNAPSHOT_DIR"
-    fi
+# group or other access at all: a planted symlink or a writable dir would let another
+# user steer what `delete`/`sweep` act on, and a traversable one would expose a frozen
+# copy of the whole subvolume (files since tightened or deleted, old setuid binaries).
+check_snapshot_dir() {
     [[ -d "$SNAPSHOT_DIR" && ! -L "$SNAPSHOT_DIR" ]] || fail "$SNAPSHOT_DIR is not a directory"
     local owner mode
     owner=$(stat -c %u -- "$SNAPSHOT_DIR")
     mode=$(stat -c %a -- "$SNAPSHOT_DIR")
     [[ "$owner" == "$EUID" ]] || fail "$SNAPSHOT_DIR is not owned by uid $EUID"
-    (( (8#$mode & 8#022) == 0 )) || fail "$SNAPSHOT_DIR is group- or world-writable"
+    (( (8#$mode & 8#077) == 0 )) || fail "$SNAPSHOT_DIR must be mode 0700 (no group or other access)"
     [[ "$(stat -f -c %T -- "$SNAPSHOT_DIR")" == btrfs ]] || fail "$SNAPSHOT_DIR is not on btrfs"
+}
+
+prepare_snapshot_dir() {
+    if [[ ! -e "$SNAPSHOT_DIR" && ! -L "$SNAPSHOT_DIR" ]]; then
+        mkdir -m 0700 -- "$SNAPSHOT_DIR" || fail "cannot create $SNAPSHOT_DIR"
+    fi
+    check_snapshot_dir
 }
 
 # btrfs: path of one of our snapshots, checked to be a real subvolume.
@@ -212,6 +217,10 @@ case "$verb" in
         valid_stack "$stack" || refuse "invalid stack name"
         valid_ts "$ts" || refuse "invalid timestamp"
         name=$(snap_name "$stack" "$ts")
+        # Only for a stack that exists: the grant must not mint whole-subvolume snapshots
+        # for arbitrary names (each pins disk until the next sweep).
+        [[ -d "$ALLOWED_APPDATA_PATH/$stack" && ! -L "$ALLOWED_APPDATA_PATH/$stack" ]] \
+            || fail "no appdata dir for stack $stack"
         if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
             prepare_snapshot_dir
             [[ ! -e "$SNAPSHOT_DIR/$name" && ! -L "$SNAPSHOT_DIR/$name" ]] || fail "$name already exists"
@@ -228,6 +237,7 @@ case "$verb" in
         valid_ts "$ts" || refuse "invalid timestamp"
         name=$(snap_name "$stack" "$ts")
         if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
+            check_snapshot_dir
             btrfs_snapshot_ok "$SNAPSHOT_DIR/$name" || fail "no such snapshot: $name"
             root="$SNAPSHOT_DIR/$name"
         else
@@ -245,7 +255,7 @@ case "$verb" in
         valid_ts "$ts" || refuse "invalid timestamp"
         name=$(snap_name "$stack" "$ts")
         if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
-            [[ -d "$SNAPSHOT_DIR" && ! -L "$SNAPSHOT_DIR" ]] || fail "no snapshot dir"
+            check_snapshot_dir
             btrfs_snapshot_ok "$SNAPSHOT_DIR/$name" || fail "no such snapshot: $name"
             btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null || fail "btrfs subvolume delete failed"
         else
@@ -260,7 +270,7 @@ case "$verb" in
         rc=0
         if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
             [[ -e "$SNAPSHOT_DIR" || -L "$SNAPSHOT_DIR" ]] || exit 0
-            [[ -d "$SNAPSHOT_DIR" && ! -L "$SNAPSHOT_DIR" ]] || fail "$SNAPSHOT_DIR is not a directory"
+            check_snapshot_dir
             shopt -s nullglob
             for snap in "$SNAPSHOT_DIR"/dsb-*; do
                 name="${snap##*/}"

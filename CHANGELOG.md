@@ -40,7 +40,12 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   `coverage.xbackup_config_errors`. A rejected x-backup block makes `coverage.status`
   `config-error`. `--coverage-report` shows each stack's `x_backup`.
 - **.prom:** `dsb_last_run_kind`, `dsb_stack_xbackup_paths{state}`,
-  `dsb_stack_xbackup_config_error`, `dsb_stack_snapshot_used`, `dsb_snapshot_fallbacks`.
+  `dsb_stack_xbackup_config_error`, `dsb_stack_snapshot_used`, `dsb_snapshot_fallbacks`,
+  `dsb_snapshot_cleanup_failures`, `dsb_snapshot_leftovers_swept`.
+- A snapshot that cannot be deleted, or a failed sweep, is counted in status.json
+  (`snapshot_cleanup`, `snapshot.delete_failed`) and the .prom, and is named in the
+  notification text, not only logged: a leftover pins disk and keeps a frozen copy of
+  the whole subvolume.
 - The dry run prints the run kind, each stack's tiers with their reasons, the resolved
   snapshot backend and each stack's snapshot plan.
 
@@ -64,6 +69,8 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   `sum by (host)` results, which never match once `job`/`instance` labels exist, so the
   alert could not fire. Every term is now aggregated, and it includes the x-backup
   config-error gauge (p4 finding).
+- The tar helper pins `PATH` (as the snapshot helper does): tar looks up its compressor
+  there, and a root or doas run inherited the caller's.
 - **Root helpers pin `LC_ALL=C`.** In a UTF-8 locale, bash's `[A-Za-z]` follows
   collation and matched letters such as `é`. sudo keeps `LANG`/`LC_*` by default, so the
   tar helper's stack-name check was locale-dependent. Found by the new path-rule parity

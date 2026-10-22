@@ -122,7 +122,8 @@ removes or changes the meaning of a field bumps it.
 | `stacks[].downtime_s` | `compose stop` until `restart_stack_with_retry` reports every service up. `0` for a stopped stack; `null` if never stopped, or never started again. Post-restart hooks are not included. With a snapshot the stack is started before the archive is written, so this no longer includes the archive time. |
 | `stacks[].coverage` | `status`: `ok`, `uncovered` (an alerting item without an exemption) or `unknown` (`docker compose config` failed; `error` has its first stderr line). `null` on an aborted run. |
 | `stacks[].x_backup` | the stack's backup tiers as this run applied them (0.7.0; USAGE.md "Backup tiers"). `status`: `none` (no block), `ok`, `config-error` (the block was rejected: `errors` says why, and the stack was backed up **in full**) or `unknown` (`docker compose config` failed, or the reader did; backed up in full). `excluded` lists what was left out: `tier` is `exclude` or `weekly`, `action` is `excluded` or `deferred` (a weekly path on a daily run; not the same thing for alerting), `exists` is `true`/`false`/`null` (could not be told, e.g. a root-only dir on an unprivileged run). `stale`: declared paths that do not exist (still excluded, not an error). `retention`: reserved for restic (0.8.0). `null` for a stack that never got that far (skipped before the stop, or an aborted run). |
-| `stacks[].snapshot` | present when a snapshot backend is in use (0.7.0; USAGE.md "Snapshots"), else `null`. `used`: archived from a snapshot. `fallback_reason` (archived the old way, stopped): `nested-subvolume`, `nested-dataset`, `mountpoint`, `snapdir-disabled`, `check-failed`, `create-failed`, `source-failed`; `null` when the snapshot was used or the stack was stopped already (nothing to quiesce). `snapshot_s`: seconds to take it. |
+| `stacks[].snapshot` | present when a snapshot backend is in use (0.7.0; USAGE.md "Snapshots"), else `null`. `used`: archived from a snapshot. `fallback_reason` (archived the old way, stopped): `nested-subvolume`, `nested-dataset`, `mountpoint`, `snapdir-disabled`, `check-failed`, `create-failed`; `null` when the snapshot was used or the stack was stopped already (nothing to quiesce). `snapshot_s`: seconds to take it. `delete_failed`: the snapshot could not be deleted after its archive (the next run's sweep retries). |
+| `snapshot_cleanup` | with a snapshot backend, else `null`: `failed` counts the deletes that failed this run, plus 1 if the start-of-run sweep failed; `swept` counts the leftovers from earlier runs that the sweep removed. A snapshot that is never deleted pins disk and keeps a frozen copy of the whole subvolume, so `failed > 0` is also in the notification text. |
 | `unowned_appdata` | every **directory** in `APPDATA_PATH` that matches no stack. Regular files and symlinks are skipped. `estimate: true` when `du` could not read everything (e.g. root-owned appdata, unprivileged run). `null` on an aborted run. |
 | `exemptions.status` | `ok`, `missing` (no file; no exemptions) or `config-error` (lines were rejected; `errors` lists them; the valid lines still apply). |
 | `coverage.status` | `config-error` > `unknown` > `uncovered` > `ok`, the worst that applies to the run. `config-error` covers the exemptions file and, from 0.7.0, any stack whose x-backup block was rejected (`xbackup_config_errors` counts them). `unknown` also when `APPDATA_PATH` could not be listed: then `coverage.unowned_appdata_status` is `unknown` and `unowned_appdata_error` says why. An unreadable area is never reported as an empty one. |
@@ -251,6 +252,8 @@ maximum, last success takes the oldest.
 | `dsb_stack_xbackup_config_error` | `stack` | 1 if the stack's x-backup block was rejected and it was backed up in full (0.7.0) |
 | `dsb_stack_snapshot_used` | `stack` | 1 if archived from a snapshot; only with a snapshot backend (0.7.0) |
 | `dsb_snapshot_fallbacks` | | stacks archived the old way although a backend is set; only with a snapshot backend (0.7.0) |
+| `dsb_snapshot_cleanup_failures` | | snapshot deletes that failed, +1 if the sweep failed; only with a snapshot backend (0.7.0) |
+| `dsb_snapshot_leftovers_swept` | | leftovers from earlier runs removed by this run's sweep; only with a snapshot backend (0.7.0) |
 
 On an aborted run the per-stack result and coverage series are absent (the loop did not
 run); the host series and `dsb_stack_last_success_timestamp_seconds` are still written.
@@ -284,6 +287,12 @@ a label set, and `+` matches nothing: the alert can never fire. Up to 0.6.0 this
     sum by (host) (dsb_coverage_uncovered) + sum by (host) (dsb_coverage_unknown)
     + sum by (host) (dsb_unowned_appdata_unexempt) + sum by (host) (dsb_unowned_appdata_unknown)
     + sum by (host) (dsb_stack_xbackup_config_error) > 0
+  for: 1h
+
+# A snapshot could not be deleted (or the sweep failed): it pins disk and holds a frozen
+# copy of the whole subvolume until a later sweep succeeds.
+- alert: DockerStackBackupSnapshotCleanup
+  expr: sum by (host) (dsb_snapshot_cleanup_failures) > 0
   for: 1h
 
 # Snapshots configured, but a stack was archived the old way (stopped for the whole

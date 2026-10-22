@@ -83,6 +83,18 @@ snapshot-assisted backup. Its trust boundary:
 - The tar helper's `--from-snapshot` takes a timestamp, not a path, and gets the path
   from this helper's `source` verb.
 
+**Accepted:** whoever holds the sudo grant can `create` snapshots for any existing stack
+with any well-formed timestamp, each pinning disk until the next sweep (or their own
+`sweep`). That is a local disk-space denial of service by the backup user, not a read
+or write escalation: `source` output is used only by the root tar helper, which archives
+just `<stack>`.
+
+**Accepted:** anyone who can edit a stack's compose file can declare `x-backup.exclude`
+paths and so leave a subtree of that stack's appdata out of the backup. A declaration
+can only narrow the stack's own backup, every one needs a reason, and each one is
+visible in status.json (`x_backup.excluded`) and the .prom (`dsb_stack_xbackup_paths`).
+The compose files are as trusted as the stack's own configuration.
+
 **Accepted:** the snapshot is of the whole subvolume or dataset that holds the appdata
 root (on forge, `@opt`), not of one stack's directory. It is read-only, lives in a
 root-only directory, and is deleted after the stack's archive. While it exists, it

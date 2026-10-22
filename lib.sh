@@ -121,9 +121,11 @@ log_warning() {
 # target. So: refuse a symlink or a non-regular file, open with `<>` (O_CREAT, no
 # O_TRUNC), then check that the open fd and an lstat of the path name the same inode, so
 # a swap between the check and the open is refused too. The PID is written through the
-# fd's /proc link only after that check. Residual: a device node swapped in between the
-# lstat and the open still has its open handler run; the lock dir must not be writable by
-# anyone the backup user does not trust.
+# fd's /proc link only after that check. Residuals (bash has no O_NOFOLLOW): a device node
+# swapped in between the lstat and the open still has its open handler run, and a
+# dangling symlink swapped in there makes the open create an empty file at its target
+# before the inode check refuses it. The lock dir must not be writable by anyone the
+# backup user does not trust; a root run should use a root-owned LOCK_FILE dir.
 open_lock_file() {
     [[ "${LOCK_FD:-200}" =~ ^[0-9]+$ ]] || LOCK_FD=200
     : "${LOCK_FD:=200}" "${LOCK_FILE:=/var/run/docker-stack-backup.lock}"
@@ -143,6 +145,13 @@ open_lock_file() {
     if [[ -z "$path_id" || "$path_id" != "$fd_id" ]]; then
         eval "exec $LOCK_FD>&-"
         log_error "Lock file was replaced while it was being opened, refusing it: $LOCK_FILE"
+        return 1
+    fi
+    # What was opened must be a regular file too: a FIFO swapped in before the open, and
+    # left there, passes the inode check.
+    if [[ ! -f "/proc/$$/fd/$LOCK_FD" ]]; then
+        eval "exec $LOCK_FD>&-"
+        log_error "Lock file is not a regular file, refusing it: $LOCK_FILE"
         return 1
     fi
 }
@@ -275,7 +284,13 @@ validate_numeric_config() {
 FULL_RUN_DAY="${FULL_RUN_DAY:-7}"
 
 resolve_run_kind() {
-    if [[ "${FORCE_FULL_RUN:-false}" == true || "$(date +%u)" == "${FULL_RUN_DAY:-7}" ]]; then
+    # Compared as numbers: "07" is day 7 (validate_uint accepts and normalises it, but this
+    # may run before the validation, e.g. for --coverage-report). A value that is not 1-2
+    # digits never matches, and validate_numeric_config then stops the run.
+    local day="${FULL_RUN_DAY:-7}" today
+    today=$(date +%u)
+    if [[ "${FORCE_FULL_RUN:-false}" == true ]] || \
+       { [[ "$day" =~ ^[0-9]{1,2}$ ]] && (( 10#$day == 10#$today )); }; then
         echo full
     else
         echo daily
@@ -802,16 +817,25 @@ read_xbackup() {
     command -v python3 >/dev/null 2>&1 || return 0
     local -a paths=()
     local diag; diag=$(mktemp) || return 0
-    if ! mapfile -d '' -t paths < <(python3 -I "$SCRIPT_DIR/dsb_status.py" xbackup \
-            --stack-path "$stack_path" --appdata-dir "$APPDATA_PATH/$stack_name" \
-            --run-kind "$run_kind" --out "$out" 2>"$diag"); then
-        paths=()
+    local list; list=$(mktemp) || { rm -f -- "$diag"; return 0; }
+    # Through a file, not a process substitution, so python's exit status is seen: a
+    # reader that failed part-way (a truncated last path would still be a valid path)
+    # excludes nothing.
+    local rc=0
+    python3 -I "$SCRIPT_DIR/dsb_status.py" xbackup \
+        --stack-path "$stack_path" --appdata-dir "$APPDATA_PATH/$stack_name" \
+        --run-kind "$run_kind" --out "$out" > "$list" 2>"$diag" || rc=$?
+    if [[ $rc -eq 0 ]]; then
+        mapfile -d '' -t paths < "$list" || paths=()
+    else
+        log_warning "$stack_name: x-backup reader failed (exit $rc); backing up in full"
+        rm -f -- "$out"
     fi
     local line
     while IFS= read -r line; do
         log_warning "$stack_name: $line"
     done < "$diag"
-    rm -f -- "$diag"
+    rm -f -- "$diag" "$list"
     local p
     for p in "${paths[@]+"${paths[@]}"}"; do
         if ! valid_declared_path "$p"; then
@@ -832,11 +856,11 @@ read_xbackup() {
 # Requires: SNAPSHOT_HELPER_PATH, ELEVATION_CMD
 #######################################
 snapshot_helper() {
-    if [[ "${ELEVATION_CMD:-none}" == none ]]; then
-        "$SNAPSHOT_HELPER_PATH" "$@"
-    else
-        "$ELEVATION_CMD" "$SNAPSHOT_HELPER_PATH" "$@"
-    fi
+    case "${ELEVATION_CMD:-none}" in
+        none)      "$SNAPSHOT_HELPER_PATH" "$@" ;;
+        sudo|doas) "$ELEVATION_CMD" "$SNAPSHOT_HELPER_PATH" "$@" ;;
+        *) log_error "Unsupported ELEVATION_CMD: '$(printable "${ELEVATION_CMD:-}")' (expected: none | sudo | doas)"; return 2 ;;
+    esac
 }
 
 # resolve_snapshot_backend — sets SNAPSHOT_RESOLVED (none|btrfs|zfs) and SNAPSHOT_NOTE

@@ -38,6 +38,10 @@ set -euo pipefail
 # Character classes below must mean ASCII: in a UTF-8 locale bash's [A-Za-z] follows the
 # locale's collation and matches letters such as 'é' (sudo keeps LANG/LC_* by default).
 export LC_ALL=C
+# Fixed search path for the compressor tar runs (-z/-j/-J/--zstd): a root run with
+# ELEVATION_CMD=none, or doas, would otherwise inherit the caller's PATH.
+PATH="/usr/sbin:/usr/bin:/sbin:/bin"
+export PATH
 
 #######################################
 # Trust boundary — the allowed appdata bind-mount root.

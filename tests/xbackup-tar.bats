@@ -145,6 +145,17 @@ CFG
     members "$ARCHIVE" | grep -q "$STACK/idx/i"
 }
 
+@test "FULL_RUN_DAY with a leading zero (07) is the same day: compared as a number (baseline IV-60)" {
+    xb_config '{"weekly": [{"path": "idx", "reason": "r"}]}'
+    export FULL_RUN_DAY="0$(date +%u)"
+    backup_archive helper
+    [ "$(js "$STATUS" 'd["run_kind"]')" = '"full"' ]
+    members "$ARCHIVE" | grep -q "$STACK/idx/i"
+    # And --coverage-report, which runs before any validation, agrees.
+    run_backup --coverage-report
+    [[ "$output" == *'"run_kind": "full"'* ]]
+}
+
 @test "an invalid FULL_RUN_DAY stops the run (invalid-config)" {
     export FULL_RUN_DAY=8
     run_backup

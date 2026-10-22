@@ -62,7 +62,7 @@ SNAPSHOT_BACKENDS = ("none", "btrfs", "zfs")
 # Why a stack with a snapshot backend was archived the old way (stop-archive-start).
 FALLBACK_REASONS = (
     "nested-subvolume", "nested-dataset", "mountpoint", "snapdir-disabled",
-    "check-failed", "create-failed", "source-failed",
+    "check-failed", "create-failed",
 )
 PLATFORMS = ("debian", "truenas", "generic")
 
@@ -153,6 +153,7 @@ def cmd_record(argv):
     ap.add_argument("--snapshot-used", default="")
     ap.add_argument("--snapshot-fallback", default="")
     ap.add_argument("--snapshot-s", default="")
+    ap.add_argument("--snapshot-delete-failed", default="")
     opts = ap.parse_args(argv[10:])
     rec = {
         "name": clean(name),
@@ -174,6 +175,7 @@ def cmd_record(argv):
             "used": opts.snapshot_used == "1",
             "fallback_reason": fb if fb in FALLBACK_REASONS else (None if not fb else "unknown"),
             "snapshot_s": opt_int(opts.snapshot_s),
+            "delete_failed": opts.snapshot_delete_failed == "1",
         }
     line = json.dumps(rec, ensure_ascii=True) + "\n"
     with open(path, "a", encoding="ascii") as f:
@@ -1026,6 +1028,13 @@ def build_prom(doc):
         p.add("dsb_snapshot_fallbacks",
               "Stacks archived the old way (stop-archive-start) although a snapshot backend is set.",
               h, fallbacks)
+        sc = doc.get("snapshot_cleanup") or {}
+        p.add("dsb_snapshot_cleanup_failures",
+              "Snapshot deletes that failed in the last run, +1 if its start-of-run sweep failed.",
+              h, sc.get("failed") or 0)
+        p.add("dsb_snapshot_leftovers_swept",
+              "Leftover snapshots from earlier runs that the last run's sweep removed.",
+              h, sc.get("swept") or 0)
     for name, ts in sorted(doc["stack_last_success"].items()):
         p.add("dsb_stack_last_success_timestamp_seconds",
               "Last successful backup of the stack (Unix time), carried forward.",
@@ -1072,6 +1081,8 @@ def cmd_finalize(argv):
     ap.add_argument("--platform", default="")
     ap.add_argument("--snapshot-backend", default="")
     ap.add_argument("--snapshot-note", default="")
+    ap.add_argument("--snapshot-cleanup-failed", default="")
+    ap.add_argument("--snapshot-swept", default="")
     a = ap.parse_args(argv)
 
     now = int(time.time())
@@ -1147,6 +1158,9 @@ def cmd_finalize(argv):
         "platform": a.platform if a.platform in PLATFORMS else None,
         "snapshot_backend": a.snapshot_backend if a.snapshot_backend in SNAPSHOT_BACKENDS else None,
         "snapshot_note": printable(a.snapshot_note)[:200] or None,
+        "snapshot_cleanup": ({"failed": opt_int(a.snapshot_cleanup_failed) or 0,
+                              "swept": opt_int(a.snapshot_swept) or 0}
+                             if a.snapshot_backend in ("btrfs", "zfs") else None),
         "counts": counts,
         "bytes_total": sum(s["bytes"] or 0 for s in stacks if s["result"] == "backed_up"),
         "dest": {"path": clean(a.dest), "free_bytes": free},

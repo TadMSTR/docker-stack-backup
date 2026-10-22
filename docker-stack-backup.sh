@@ -115,6 +115,11 @@ SNAPSHOT_RESOLVED=none
 SNAPSHOT_NOTE=""
 # Stack whose snapshot (dsb-<stack>-<TIMESTAMP>) exists right now; on_exit deletes it.
 SNAPSHOT_INFLIGHT=""
+# Snapshot cleanup this run: deletes that failed (+1 if the start-of-run sweep failed),
+# and leftovers the sweep removed. Both go to status.json, the .prom and the notification.
+SNAPSHOT_CLEANUP_FAILED=0
+SNAPSHOT_SWEPT=0
+STACK_SNAPSHOT_DELETE_FAILED=0
 
 # Run kind (lib.sh resolve_run_kind): full on FULL_RUN_DAY or with --full, else daily.
 FORCE_FULL_RUN=false
@@ -183,6 +188,10 @@ delete_inflight_snapshot() {
         log "Snapshot deleted: dsb-$stack-$TIMESTAMP"
     else
         log_warning "Could not delete snapshot dsb-$stack-$TIMESTAMP; the next run's sweep removes it"
+        # Reported in status.json, the .prom and the notification: a snapshot that is
+        # never deleted pins disk and keeps a frozen copy of the whole subvolume.
+        SNAPSHOT_CLEANUP_FAILED=$((SNAPSHOT_CLEANUP_FAILED + 1))
+        STACK_SNAPSHOT_DELETE_FAILED=1
         return 1
     fi
 }
@@ -441,6 +450,7 @@ write_run_status() {
         --started "${RUN_STARTED:-}" --dest "$BACKUP_DEST" \
         --run-kind "$RUN_KIND" --platform "${RESOLVED_PLATFORM:-}" \
         --snapshot-backend "$SNAPSHOT_RESOLVED" --snapshot-note "$SNAPSHOT_NOTE" \
+        --snapshot-cleanup-failed "$SNAPSHOT_CLEANUP_FAILED" --snapshot-swept "$SNAPSHOT_SWEPT" \
         --aborted "$aborted" 2>"$diag") || rc=$?
     [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$RUN_TMP/diag"
     [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$diag"
@@ -632,6 +642,7 @@ backup_stack() {
     STACK_DOWNTIME_S=""
     STACK_RECORD_OPTS=()
     DECLARED_EXCLUDES=()
+    STACK_SNAPSHOT_DELETE_FAILED=0
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
@@ -885,7 +896,8 @@ snapshot_record_opts() {
     local used=0
     [[ "$1" == true ]] && used=1
     STACK_RECORD_OPTS+=(--snapshot-backend "$SNAPSHOT_RESOLVED" --snapshot-used "$used"
-        --snapshot-fallback "$2" --snapshot-s "$3")
+        --snapshot-fallback "$2" --snapshot-s "$3"
+        --snapshot-delete-failed "$STACK_SNAPSHOT_DELETE_FAILED")
 }
 
 #######################################
@@ -1004,9 +1016,13 @@ main() {
             :
         else
             log_warning "Snapshot sweep did not finish (see above); continuing"
+            SNAPSHOT_CLEANUP_FAILED=$((SNAPSHOT_CLEANUP_FAILED + 1))
         fi
         while IFS= read -r name; do
-            [[ -n "$name" ]] && log_warning "Removed leftover snapshot: $name"
+            if [[ -n "$name" ]]; then
+                log_warning "Removed leftover snapshot: $(printable "$name")"
+                SNAPSHOT_SWEPT=$((SNAPSHOT_SWEPT + 1))
+            fi
         done <<< "$swept"
     fi
     
@@ -1191,6 +1207,9 @@ main() {
     if [[ ${#failed_names[@]} -gt 0 ]]; then
         details+="Failed: $(join_by ', ' "${failed_names[@]}")"$'\n'
     fi
+    if [[ $SNAPSHOT_CLEANUP_FAILED -gt 0 ]]; then
+        details+="Snapshot cleanup failed: $SNAPSHOT_CLEANUP_FAILED (leftover snapshots pin disk; see the log)"$'\n'
+    fi
     details="${details%$'\n'}"
     
     # The count lines keep their pre-0.5.0 wording so existing log readers still
@@ -1209,6 +1228,9 @@ main() {
     fi
     if [[ ${#failed_names[@]} -gt 0 ]]; then
         log "Failed stacks: $(join_by ', ' "${failed_names[@]}")"
+    fi
+    if [[ $SNAPSHOT_CLEANUP_FAILED -gt 0 ]]; then
+        log_warning "Snapshot cleanup failed: $SNAPSHOT_CLEANUP_FAILED"
     fi
     log "========================================="
     

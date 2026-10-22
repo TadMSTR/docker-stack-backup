@@ -47,6 +47,17 @@ teardown() {
     [ ! -e "$SNAP_VOL/.dsb-snapshots/dsb-st-$TS" ]
 }
 
+@test "create refuses a stack with no appdata dir (no snapshots minted for arbitrary names)" {
+    snap_setup btrfs
+    run "$SNAP_HELPER" create nosuchstack "$TS"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no appdata dir for stack nosuchstack"* ]]
+    ln -s st "$SNAP_APPDATA/linked"
+    run "$SNAP_HELPER" create linked "$TS"
+    [ "$status" -eq 1 ]
+    [ -z "$(snap_mutations)" ]
+}
+
 @test "btrfs create refuses to reuse an existing name; delete of a missing snapshot fails" {
     snap_setup btrfs
     "$SNAP_HELPER" create st "$TS"
@@ -130,7 +141,20 @@ teardown() {
     snap_helper_with btrfs "$SNAP_VOL/shared"
     run "$SNAP_HELPER" create st "$TS"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"group- or world-writable"* ]]
+    [[ "$output" == *"must be mode 0700"* ]]
+
+    # Readable by others is refused too: it exposes a frozen copy of the subvolume.
+    mkdir "$SNAP_VOL/readable"
+    chmod 0755 "$SNAP_VOL/readable"
+    snap_helper_with btrfs "$SNAP_VOL/readable"
+    run "$SNAP_HELPER" create st "$TS"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"must be mode 0700"* ]]
+    # delete, source and sweep check the dir as well, not only create.
+    run "$SNAP_HELPER" sweep
+    [ "$status" -eq 1 ]
+    run "$SNAP_HELPER" delete st "$TS"
+    [ "$status" -eq 1 ]
     [ -z "$(snap_mutations)" ]
 }
 
@@ -240,7 +264,7 @@ NAIVE
 
 @test "probe: path injection through the stack name" {
     snap_setup btrfs
-    mkdir -p "$SNAP_VOL/.dsb-snapshots"
+    mkdir -p -m 0700 "$SNAP_VOL/.dsb-snapshots"
     "$(naive_helper)" delete "x/../../../victim" "$TS"
     grep -q "btrfs subvolume delete $SNAP_VOL/.dsb-snapshots/dsb-x/../../../victim" "$SNAP_LOG"   # fires
     : > "$SNAP_LOG"
@@ -258,7 +282,7 @@ NAIVE
 
 @test "probe: path injection through the timestamp" {
     snap_setup btrfs
-    mkdir -p "$SNAP_VOL/.dsb-snapshots"
+    mkdir -p -m 0700 "$SNAP_VOL/.dsb-snapshots"
     "$(naive_helper)" delete st "$TS/../../../../victim"
     grep -q "/../../../../victim" "$SNAP_LOG"   # fires
     : > "$SNAP_LOG"
@@ -291,7 +315,8 @@ NAIVE
 @test "probe: sweep touching a snapshot that is not dsb-<stack>-<ts>" {
     snap_setup btrfs
     local sd="$SNAP_VOL/.dsb-snapshots"
-    mkdir -p "$sd/manual-keep"
+    mkdir -p -m 0700 "$sd"
+    mkdir "$sd/manual-keep"
     echo "$sd/manual-keep" >> "$SNAP_T/subvols"
     "$(naive_helper)" sweep
     grep -qx "btrfs subvolume delete $sd/manual-keep" "$SNAP_LOG"   # fires
@@ -314,7 +339,7 @@ NAIVE
 
 @test "probe: a snapshot source outside the root constants" {
     snap_setup btrfs
-    mkdir -p "$SNAP_VOL/.dsb-snapshots"
+    mkdir -p -m 0700 "$SNAP_VOL/.dsb-snapshots"
     "$(naive_helper)" create /etc st "$TS"
     grep -qx "btrfs subvolume snapshot -r /etc $SNAP_VOL/.dsb-snapshots/dsb-st-$TS" "$SNAP_LOG"   # fires
     : > "$SNAP_LOG"

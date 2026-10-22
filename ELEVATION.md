@@ -195,8 +195,9 @@ If the snapshot helper is not at `/usr/local/sbin/docker-backup-snapshot.sh`, al
 `SNAPSHOT_HELPER` in the installed **tar** helper.
 
 `SNAPSHOT_DIR` must be on the same btrfs filesystem and must not be under the appdata
-root. The helper creates it 0700, and refuses one that is a symlink, is not owned by
-root, or is group- or world-writable. Example: with `/opt` a subvolume and
+root. The helper creates it 0700. It refuses one that is a symlink, is not owned by
+root, or has any group or other access, because the snapshots in it are frozen copies of
+the whole subvolume. Each verb checks this, not only `create`. Example: with `/opt` a subvolume and
 `/opt/appdata` a plain directory in it, the default is `/opt/.dsb-snapshots`, and each
 snapshot is of the `/opt` subvolume.
 

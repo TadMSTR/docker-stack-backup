@@ -190,6 +190,26 @@ assert_rejected() {
     [[ "$output" == *"x-backup: 1 stack(s) with an invalid x-backup block, backed up in full"* ]]
 }
 
+@test "the reader failing part-way (non-zero exit) excludes nothing: full backup, status unknown" {
+    xb_config '{"exclude": [{"path": "models/blobs", "reason": "re-pull"}]}'
+    echo blob > "$APPDATA_PATH/$STACK/models/blobs/b"
+    # python3 that does the xbackup work, then exits 1 (as a crash after the flush would).
+    local real; real=$(command -v python3)
+    cat > "$BIN_DIR/python3" <<STUB
+#!/usr/bin/env bash
+"$real" "\$@"; rc=\$?
+[[ " \$* " == *" xbackup "* ]] && exit 1
+exit \$rc
+STUB
+    chmod +x "$BIN_DIR/python3"
+    run_backup
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"x-backup reader failed (exit 1); backing up in full"* ]]
+    run_id=$(js "$STATUS" 'd["run_id"]' | tr -d '"')
+    tar -tf "$HOST_DIR/$run_id/$STACK.tar" | grep -qx "$STACK/models/blobs/b"
+    [ "$(js "$STATUS" 'd["stacks"][0]["x_backup"]["status"]')" = '"unknown"' ]
+}
+
 @test "a valid block: status.json carries the record, the .prom carries the counts" {
     xb_config '{"exclude": [{"path": "models/blobs", "reason": "re-pull"}, {"path": "gone", "reason": "old"}],
                 "weekly": [{"path": "idx", "reason": "rebuilt"}]}'

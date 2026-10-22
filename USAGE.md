@@ -349,7 +349,12 @@ Other behaviour:
 - The snapshot is deleted after its archive, whether the archive worked or not, and on
   any exit or signal.
 - Each run first sweeps leftover `dsb-<stack>-<timestamp>` snapshots from runs that died,
-  and logs each one. Nothing else in the snapshot dir or dataset is touched.
+  and logs each one. Nothing else in the snapshot dir or dataset is touched. The sweep
+  covers every `dsb-*` snapshot the helper manages, while the run lock is per
+  `LOCK_FILE`. So use **one** schedule (one config) per helper: two configs sharing a
+  helper with different `LOCK_FILE`s would sweep each other's in-flight snapshots.
+- A delete that fails, or a sweep that fails, is counted in `snapshot_cleanup.failed`
+  (status.json), in `dsb_snapshot_cleanup_failures`, and in the notification text.
 - If the stack fails to start again after the snapshot, the archive is still made (the
   snapshot holds the quiesced data), and the stack is reported `failed` / `restart-failed`
   as before.
