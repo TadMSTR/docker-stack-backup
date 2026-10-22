@@ -103,8 +103,10 @@ files get the caller's owners and modes back; the stage dir, the archive's `./`
 member, is root's. It is never given to the caller: in sticky `/tmp` the owner of an
 entry can rename it, which would let it swap a symlink in under `tar -C` (audit
 2026-10-22, R4-01). Anything else in the temp dir is ignored. If the drop to the caller
-cannot be made, or an allowlisted name cannot be examined, the archive fails, and a temp
-dir with no compose file is refused (R4-02). So whatever the caller does to its own `/tmp/<name>` (swap it
+cannot be made, or an allowlisted name that is present cannot be stat'ed, the archive
+fails, and a temp dir with no compose file is refused (R4-02). A name the caller's own
+dir hides from the caller itself (it removes its own search permission mid-run) reads as
+absent; that only drops the caller's own file from its own backup. So whatever the caller does to its own `/tmp/<name>` (swap it
 for a symlink, rename another of its directories there, plant a link to a file it cannot
 read), root archives only bytes the caller could read itself.
 

@@ -310,8 +310,13 @@ exec "$@"'
 }
 
 @test "R4-01: the stage dir is never handed to the caller, and a swapped stage is refused before tar" {
-    # Static: nothing chowns the stage dir itself (only the files in it).
-    ! grep -nE 'chown [^#]*-- "\$stage"( |$)' "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh"
+    # Static: no chown/chmod touches the stage dir itself (any form: -R, "$stage/.",
+    # "$stage/"), only "$stage/$name", the files in it. The ownership protection itself
+    # (a non-owner cannot rename a root-owned /tmp entry) needs a second uid: not run here
+    # (audit p5a R5-02); the deploy checks it as real root.
+    ! grep -nE '(chown|chmod)[^#]*"\$stage' "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh" \
+        | grep -v '"\$stage/\$name"'
+    grep -qE 'chown [^#]*"\$stage/\$name"' "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh"
     # Dynamic (unprivileged, so we own the stage anyway): the last read swaps the stage for
     # a symlink, as a caller owning it could; the check right before tar refuses it.
     # The decoy holds a compose.yaml too, so the rest of the staging loop runs through the
