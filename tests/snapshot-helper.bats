@@ -499,3 +499,29 @@ STUB
     [ "$output" = "fallback mountpoint" ]
     [ -z "$(snap_mutations)" ]
 }
+
+@test "R2-02: nested subvolume found in the snapshot and its delete fails -> exit 4, fallback printed" {
+    snap_setup btrfs
+    STUB_INODE2=1 STUB_SNAP_DELETE_RC=1 run "$SNAP_HELPER" create st "$TS"
+    [ "$status" -eq 4 ]
+    [[ "$output" == *"fallback nested-subvolume"* ]]
+    [[ "$output" == *"could not delete it"* ]]
+    # And with a working delete: exit 3, nothing left.
+    "$SNAP_HELPER" delete st "$TS"
+    STUB_INODE2=1 run "$SNAP_HELPER" create st "$TS"
+    [ "$status" -eq 3 ]
+    [ "$output" = "fallback nested-subvolume" ]
+    [ ! -e "$SNAP_VOL/.dsb-snapshots/dsb-st-$TS" ]
+}
+
+@test "R2-04: a snapshot dir on another filesystem than the subvolume is refused at info" {
+    snap_setup btrfs
+    printf '%s\n' "$SNAP_APPDATA" > "$SNAP_T/subvols"
+    export STUB_MNT="$SNAP_APPDATA"
+    # Appdata is a mounted subvolume; its parent (where the default goes) is another fs.
+    export STUB_OTHER_FS="$SNAP_VOL"
+    run "$SNAP_HELPER" info
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is not on the btrfs filesystem of $SNAP_APPDATA"* ]]
+    [[ "$output" == *"set SNAPSHOT_DIR in this helper"* ]]
+}

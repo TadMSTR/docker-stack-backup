@@ -9,7 +9,9 @@
 # PATH line starting with the shim dir. Every shimmed btrfs/zfs call is appended to
 # $SNAP_LOG ("btrfs <args>" / "zfs <args>").
 #
-# Knobs: STUB_SNAP_CREATE_RC (btrfs snapshot / zfs snapshot fail), STUB_SNAP_DELETE_RC,
+# Knobs: STUB_OTHER_FS (findmnt -o UUID reports another filesystem for exactly this path),
+# STUB_INODE2 (find reports a nested-subvolume placeholder in every -inum 2 scan),
+# STUB_SNAP_CREATE_RC (btrfs snapshot / zfs snapshot fail), STUB_SNAP_DELETE_RC,
 # STUB_SNAPDIR (zfs snapdir, default hidden), $SNAP_T/mounts (extra findmnt -rn lines,
 # "TARGET FSTYPE").
 
@@ -83,10 +85,19 @@ STUB
 #!/usr/bin/env bash
 case "$*" in
     *"-o SOURCE --target"*) echo "$STUB_DATASET" ;;
+    *"-o UUID --target"*)
+        # Every path is one filesystem, except under STUB_OTHER_FS.
+        if [[ -n "${STUB_OTHER_FS:-}" && "${!#}" == "$STUB_OTHER_FS" ]]; then echo other-fs-uuid; else echo test-fs-uuid; fi ;;
     *"-o TARGET --target"*) echo "$STUB_MNT" ;;
     "-rn -o TARGET,FSTYPE") echo "/ ext4"; cat "$SNAP_T/mounts" ;;
     *) exit 1 ;;
 esac
+STUB
+    cat > "$SNAP_SHIM/find" <<'STUB'
+#!/usr/bin/env bash
+# An inode-2 scan finds a placeholder when STUB_INODE2=1 (real btrfs is in the -real test).
+if [[ "${STUB_INODE2:-0}" == 1 && " $* " == *" -inum 2 "* ]]; then echo "$2/placeholder"; exit 0; fi
+exec /usr/bin/find "$@"
 STUB
     chmod +x "$SNAP_SHIM"/*
 

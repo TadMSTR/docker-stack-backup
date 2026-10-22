@@ -207,7 +207,12 @@ snapshot would show the directory under that mount.
 
 `SNAPSHOT_DIR` must be on the same btrfs filesystem and must not be under the appdata
 root. When the appdata root is itself a subvolume, the default is next to it
-(`<parent>/.dsb-snapshots`). The helper creates it 0700. It refuses one that is a symlink, is not owned by
+(`<parent>/.dsb-snapshots`). The helper checks that the snapshot dir is on the same btrfs
+filesystem as the subvolume (by filesystem UUID) and refuses to run otherwise. That is
+the usual case for a **mounted** appdata subvolume (`subvol=@appdata` at
+`/srv/appdata`, or a dedicated btrfs disk), whose parent is another filesystem: set
+`SNAPSHOT_DIR` in the helper to a directory on that same btrfs filesystem (for example a
+second mount of its top level). The helper creates it 0700. It refuses one that is a symlink, is not owned by
 root, or has any group or other access, because the snapshots in it are frozen copies of
 the whole subvolume. Each verb checks this, not only `create`. Example: with `/opt` a subvolume and
 `/opt/appdata` a plain directory in it, the default is `/opt/.dsb-snapshots`, and each

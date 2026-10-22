@@ -27,7 +27,8 @@
 #                           name; anything else is left alone
 # <stack>: one path component of [A-Za-z0-9._-], not '.', '..' or starting with '-'.
 # <ts>:    YYYYMMDD_HHMMSS (the run timestamp).
-# Exit: 0 done, 1 the operation failed, 2 refused (bad arguments or constants).
+# Exit: 0 done, 1 the operation failed, 2 refused (bad arguments or constants);
+#       create only: 3 fallback (nothing left behind), 4 a snapshot it took is left behind.
 #
 # The tar helper's --from-snapshot mode asks this helper's `source` verb for the path, so
 # the snapshot path rule lives here only.
@@ -134,6 +135,16 @@ if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
     clean_abs "$SNAPSHOT_DIR" || refuse "SNAPSHOT_DIR must be a clean absolute path"
     if [[ "$SNAPSHOT_DIR" == "$ALLOWED_APPDATA_PATH" || "$SNAPSHOT_DIR" == "$ALLOWED_APPDATA_PATH"/* ]]; then
         refuse "SNAPSHOT_DIR ($SNAPSHOT_DIR) must not be under ALLOWED_APPDATA_PATH; set SNAPSHOT_DIR in this helper"
+    fi
+    # A snapshot can only be made on the same btrfs filesystem. Next to a MOUNTED appdata
+    # subvolume, the default lands on the parent mount, usually another filesystem: say so
+    # here, at `info`, not as a create failure after every stop (audit p5a R2-04).
+    snapdir_probe="$SNAPSHOT_DIR"
+    while [[ ! -e "$snapdir_probe" && "$snapdir_probe" != / ]]; do snapdir_probe=$(dirname -- "$snapdir_probe"); done
+    fs_subvol=$(findmnt -n -o UUID --target "$SUBVOL" 2>/dev/null) || fs_subvol=""
+    fs_snapdir=$(findmnt -n -o UUID --target "$snapdir_probe" 2>/dev/null) || fs_snapdir=""
+    if [[ -z "$fs_subvol" || "$fs_subvol" != "$fs_snapdir" ]]; then
+        refuse "SNAPSHOT_DIR ($SNAPSHOT_DIR) is not on the btrfs filesystem of $SUBVOL; set SNAPSHOT_DIR in this helper to a directory on that filesystem"
     fi
 else
     DATASET=$(findmnt -n -o SOURCE --target "$ALLOWED_APPDATA_PATH") || refuse "cannot find the dataset of $ALLOWED_APPDATA_PATH"
@@ -265,13 +276,20 @@ case "$verb" in
             btrfs subvolume snapshot -r "$SUBVOL" "$SNAPSHOT_DIR/$name" >/dev/null || fail "btrfs snapshot failed"
             # And what the snapshot itself holds, which no race can change: btrfs shows a
             # nested subvolume inside a snapshot as an empty directory with inode 2.
+            # Exit 4 if a snapshot it took here could not be deleted again: the caller
+            # must count that leftover (audit p5a R2-02), not read it as "no snapshot".
             inner="$SNAPSHOT_DIR/$name${REL:+/$REL}/$stack"
             if ! hidden=$(find "$inner" -type d -inum 2 -print -quit); then
-                btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null || true
+                btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null \
+                    || { echo "docker-backup-snapshot: cannot walk the snapshot of $stack, and could not delete $name" >&2; exit 4; }
                 fail "cannot walk the snapshot of $stack"
             fi
             if [[ -n "$hidden" ]]; then
-                btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null || fail "could not delete $name after finding a nested subvolume in it"
+                if ! btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null; then
+                    echo "docker-backup-snapshot: found a nested subvolume in $name, and could not delete it" >&2
+                    echo "fallback nested-subvolume"
+                    exit 4
+                fi
                 echo "fallback nested-subvolume"
                 exit 3
             fi

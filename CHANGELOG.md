@@ -66,7 +66,8 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   `/tmp`) let anyone holding the NOPASSWD grant read any directory as root. It now
   requires a real directory (not a symlink), owned by the invoking user (`SUDO_UID` /
   `DOAS_USER`), mode 0700, as `mktemp -d` makes it. It `cd -P`s into it, checks `.`, and
-  archives `-C .`, so a swap after the check cannot redirect it. **Reinstall the tar
+  archives `-C .`. After the `cd` the physical working directory must equal the validated
+  path, so a symlink swapped in at any moment before it is refused too. **Reinstall the tar
   helper on every host that grants it**, even if you use none of 0.7.0's other features.
 - The snapshot helper refuses to run when a mount sits between the subvolume it would
   snapshot and the appdata root. A snapshot would show what is under that mount, not the
@@ -75,6 +76,12 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   new snapshot for the empty placeholder (inode 2) that a nested subvolume leaves, and
   falls back if it finds one, so a subvolume made after `check` cannot be silently left
   out.
+- A snapshot `create` took and could not delete again (after finding a nested subvolume
+  in it) is reported with its own exit code and counted as a cleanup failure, not
+  silently left for the next sweep.
+- The snapshot dir must be on the same btrfs filesystem as the snapshotted subvolume,
+  checked at `info`, so a mounted appdata subvolume with an unusable default is reported
+  at the preflight, not as a failed snapshot after every stop.
 - The tar helper checks the snapshot helper before running it as root: a regular file,
   not a symlink, root-owned, not group or other writable. It also checks that both
   helpers agree on the appdata root, and that `source` points inside that exact

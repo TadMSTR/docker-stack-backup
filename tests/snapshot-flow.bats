@@ -169,6 +169,16 @@ STUB
     [ "$(js "$STATUS" 'd["stacks"][0]["result"]')" = '"backed_up"' ]
 }
 
+@test "R2-02: create left a snapshot behind (exit 4) and the retry fails: counted, not silent" {
+    export STUB_INODE2=1 STUB_SNAP_DELETE_RC=1
+    run_backup
+    [ "$status" -eq 0 ]
+    [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["fallback_reason"]')" = '"nested-subvolume"' ]
+    [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["delete_failed"]')" = true ]
+    [ "$(js "$STATUS" 'd["snapshot_cleanup"]["failed"]')" = 1 ]
+    [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
+}
+
 @test "the boundary check failing is 'cannot tell': fallback check-failed, never a snapshot" {
     # A stack dir that is a symlink makes `check` fail (exit 1).
     mv "$APPDATA_PATH/$STACK" "$APPDATA_PATH/real"

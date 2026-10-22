@@ -180,3 +180,24 @@ old_helper() {
     [ "$status" -eq 2 ]
     [[ "$output" == *"cannot tell the invoking user"* ]]
 }
+
+@test "R2-01: a symlink swapped in after the -L test is refused after cd -P (pwd -P check)" {
+    # The race is made deterministic: a copy of the helper without its `! -L` test, given
+    # a symlink. Only the pwd -P check stands between it and the symlink's target.
+    local secret="$TEST_DIR/secret"
+    mkdir -m 0700 "$secret" && echo topsecret > "$secret/shadow-like"
+    local link="/tmp/dsb-r201-probe-$$"
+    PROBE_LINK="$link"
+    ln -s "$secret" "$link"
+    local nolink="$TEST_DIR/helper-no-L.sh"
+    grep -v 'temp_dir is a symlink' "$HELPER" > "$nolink"
+    ! grep -q 'temp_dir is a symlink' "$nolink"
+    run bash "$nolink" none "$link" "$APPDATA" mystack
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"temp_dir was replaced while it was being entered"* ]]
+    [[ "$output" != *shadow-like* ]]
+    # Without the pwd -P check as well, the probe fires: the target is archived.
+    grep -v 'was replaced while it was being entered' "$nolink" > "$TEST_DIR/helper-naive.sh"
+    bash "$TEST_DIR/helper-naive.sh" none "$link" "$APPDATA" mystack > "$TEST_DIR/naive.tar"
+    tar -tf "$TEST_DIR/naive.tar" | grep -qx './shadow-like'
+}

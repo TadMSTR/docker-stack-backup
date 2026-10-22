@@ -89,9 +89,13 @@ elif [[ -n "${DOAS_USER:-}" ]]; then
 fi
 [[ "$invoker_uid" =~ ^[0-9]+$ ]] || { echo "docker-backup-tar-create: cannot tell the invoking user" >&2; exit 2; }
 [[ ! -L "$temp_dir" ]] || { echo "docker-backup-tar-create: temp_dir is a symlink: $temp_dir" >&2; exit 2; }
-# Check the directory we are IN, after `cd -P`, and archive it as `-C .`: a swap of the
-# /tmp entry after this point (the caller owns it) cannot redirect the archive.
+# The caller owns the /tmp entry and can swap it at any moment, also between the test
+# above and the `cd` below (audit p5a R2-01). So after `cd -P` the physical cwd must BE
+# the validated path: that proves no symlink was followed, whatever happened before.
+# Then the checks on `.` and the archive (`-C .`) use the directory we are in, which no
+# later swap of the entry can change.
 cd -P -- "$temp_dir" || { echo "docker-backup-tar-create: cannot enter temp_dir: $temp_dir" >&2; exit 2; }
+[[ "$(pwd -P)" == "$temp_dir" ]] || { echo "docker-backup-tar-create: temp_dir was replaced while it was being entered: $temp_dir" >&2; exit 2; }
 read -r td_uid td_mode < <(stat -c '%u %a' -- .) || { echo "docker-backup-tar-create: cannot stat temp_dir" >&2; exit 2; }
 [[ "$td_uid" == "$invoker_uid" ]] || { echo "docker-backup-tar-create: temp_dir is not owned by the invoking user (uid $invoker_uid): $temp_dir" >&2; exit 2; }
 (( (8#$td_mode & 8#077) == 0 )) || { echo "docker-backup-tar-create: temp_dir must be mode 0700: $temp_dir" >&2; exit 2; }

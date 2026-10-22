@@ -773,16 +773,23 @@ backup_stack() {
         else
             use_snapshot=false
             # Exit 3: a boundary appeared after the check (the helper has removed any
-            # snapshot it took). Anything else: the snapshot itself failed.
+            # snapshot it took); 4: the same, or a snapshot walk failure, but the snapshot
+            # it took is still there. Anything else: the snapshot itself failed.
             case "$create_rc:$create_out" in
-                "3:fallback nested-subvolume"|"3:fallback nested-dataset"|"3:fallback mountpoint")
+                [34]":fallback nested-subvolume"|"3:fallback nested-dataset"|"3:fallback mountpoint")
                     snap_fallback="${create_out#fallback }" ;;
                 *)  snap_fallback=create-failed ;;
             esac
             log_warning "Snapshot of $stack_name not used ($snap_fallback): archiving while it is stopped"
-            # In case it was half made; quietly, as there is usually nothing to delete.
-            snapshot_helper delete "$stack_name" "$TIMESTAMP" 2>/dev/null || true
-            SNAPSHOT_INFLIGHT=""
+            if [[ $create_rc -eq 4 ]]; then
+                # The helper took a snapshot and could not delete it: one more try, and a
+                # failure is counted like any other (audit p5a R2-02).
+                delete_inflight_snapshot || true
+            else
+                # In case it was half made; quietly, as there is usually nothing to delete.
+                snapshot_helper delete "$stack_name" "$TIMESTAMP" 2>/dev/null || true
+                SNAPSHOT_INFLIGHT=""
+            fi
         fi
     fi
 
