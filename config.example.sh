@@ -47,6 +47,24 @@ ELEVATION_CMD="none"              # none | sudo | doas
 ELEVATION_HELPER_PATH=""          # root-owned validating helper; required if ELEVATION_CMD != none
                                   # e.g. /usr/local/sbin/docker-backup-tar-create.sh
 
+# Platform profile: auto | debian | truenas. Sets DEFAULTS for ELEVATION_CMD and
+# SNAPSHOT_BACKEND (OS_COMPATIBILITY.md, "Platform profiles"); anything set in this file
+# wins. auto detects (TrueNAS SCALE reports ID=debian, so it is recognised by midclt).
+PLATFORM="auto"
+
+# Snapshot-assisted backup (USAGE.md "Snapshots"): stop -> snapshot -> start -> archive
+# from the snapshot, so a stack is down for seconds instead of the archive's duration.
+# none | auto | btrfs | zfs. Empty/unset: the platform profile's choice (debian: auto,
+# truenas: zfs), which falls back to none without a usable helper. An explicit btrfs/zfs
+# that cannot work fails the preflight. Needs the root-owned snapshot helper (ELEVATION.md).
+#SNAPSHOT_BACKEND="none"
+SNAPSHOT_HELPER_PATH=""           # e.g. /usr/local/sbin/docker-backup-snapshot.sh
+
+# Full run day for the x-backup tiers (USAGE.md "Backup tiers"): 1 = Monday … 7 = Sunday.
+# A full run backs up each stack's `weekly` paths too; other days defer them. --full
+# forces a full run.
+FULL_RUN_DAY=7
+
 # Stacks that have appdata but no running containers.
 # true (default): archive them as they are — nothing is stopped or started.
 # false: skip them; they are reported as skipped with reason "not-running".

@@ -99,8 +99,25 @@ When `ELEVATION_CMD` is `none` (default), behavior is unchanged — `tar` runs d
 When it is `sudo` or `doas`, `create_compressed_archive()` calls:
 
 ```
-<ELEVATION_CMD> <ELEVATION_HELPER_PATH> <compression> <temp_dir> <appdata_path> <stack_name> [excludes…] > <output_file>
+<ELEVATION_CMD> <ELEVATION_HELPER_PATH> <compression> <temp_dir> <appdata_path> <stack_name> \
+    [--from-snapshot <ts>] [excludes…] [-- <stack_name>/<declared_path>…] > <output_file>
 ```
+
+`temp_dir` must be the caller's own private directory, as `mktemp -d` makes it: a real
+directory directly under `/tmp` (not a symlink), owned by the invoking user (`SUDO_UID`
+and `SUDO_GID` under sudo, `DOAS_USER` under doas), mode 0700. The helper does not read
+it as root. It reads only `compose.yaml`, `compose.yml`, `docker-compose.yaml`,
+`docker-compose.yml` and `.env` from it, **as the invoking user** via `setpriv`
+(util-linux; present on Debian and TrueNAS SCALE). Each must be a regular file of at
+most 16 MiB. It copies them into a private, root-owned staging dir and archives that.
+The archive's root `./` member is now root's, and everything else looks as before. A
+failing `setpriv`, or a temp dir with no compose file, fails the archive. Before 0.7.0 any existing `/tmp/<name>` was archived as root,
+which let the grant read any directory as root; reinstall the helper.
+
+`excludes` are the global `EXCLUDE_PATTERNS` (unanchored globs). After `--` come the
+stack's x-backup declared paths (0.7.0), which the helper re-validates and passes to tar
+anchored and literal (`--anchored --no-wildcards`), after the globs, so they cannot change
+how the globs match. `--from-snapshot` is described under "The snapshot helper" below.
 
 and fails closed (logs an error, aborts that stack's archive) if the helper path is
 unset/not executable, `ELEVATION_CMD` is not `sudo`/`doas`, or the archive layout is not
@@ -150,6 +167,90 @@ the expected `-C <temp_dir> . -C <appdata_path> <stack_name>`.
    ```bash
    sudo -n -l -U backupuser        # should show only the helper path
    ```
+
+## The snapshot helper
+
+*0.7.0.* Snapshot-assisted backup (USAGE.md, "Snapshots") needs a second root helper,
+`docker-backup-snapshot.sh`. It creates and deletes btrfs subvolume snapshots or ZFS
+snapshots. A loose `sudo btrfs` or `sudo zfs` grant would let the backup user delete any
+subvolume or destroy any dataset, so, like the tar helper, it **takes no path from its
+caller**. Its constants, which only root can edit, decide every path. The caller passes
+a verb, a stack name (`[A-Za-z0-9._-]`, not `.`/`..`, no leading `-`) and the run
+timestamp (`YYYYMMDD_HHMMSS`):
+
+| Verb | Does |
+|---|---|
+| `info` | prints the helper's settings; the backup checks `appdata=` against `APPDATA_PATH` |
+| `check <stack>` | `ok`, or `fallback <reason>` if a snapshot would hide data under the stack |
+| `create <stack> <ts>` | read-only snapshot `dsb-<stack>-<ts>` of the subvolume / dataset holding the appdata root |
+| `source <stack> <ts>` | the directory holding `<stack>` inside that snapshot |
+| `delete <stack> <ts>` | deletes exactly that snapshot (ZFS: `zfs destroy <dataset>@dsb-<stack>-<ts>`, never `-r`) |
+| `sweep` | deletes every leftover `dsb-<stack>-<ts>`; anything else is left alone |
+
+The tar helper reads from a snapshot with `--from-snapshot <ts>`. It asks the snapshot
+helper's `source` verb for the path, so the path rule exists in one place only.
+
+Install it next to the tar helper, the same way:
+
+```bash
+sudo cp docker-backup-snapshot.sh /usr/local/sbin/docker-backup-snapshot.sh
+sudo chown root:root /usr/local/sbin/docker-backup-snapshot.sh
+sudo chmod 0750 /usr/local/sbin/docker-backup-snapshot.sh
+sudoedit /usr/local/sbin/docker-backup-snapshot.sh
+#   ALLOWED_APPDATA_PATH="/opt/appdata"   # = config.sh APPDATA_PATH = the tar helper's
+#   SNAPSHOT_BACKEND="btrfs"              # btrfs | zfs: the filesystem of that path
+#   SNAPSHOT_DIR=""                       # btrfs only; empty = <subvolume>/.dsb-snapshots
+```
+
+If the snapshot helper is not at `/usr/local/sbin/docker-backup-snapshot.sh`, also set
+`SNAPSHOT_HELPER` in the installed **tar** helper.
+
+The appdata root must be on the subvolume the helper snapshots, with no mount in
+between: if `findmnt --target <appdata root>` names a mount below that subvolume (a bind
+mount, or a `subvol=` mount of a plain directory), the helper refuses to run, because a
+snapshot would show the directory under that mount.
+
+`SNAPSHOT_DIR` must be on the same btrfs filesystem and must not be under the appdata
+root. When the appdata root is itself a subvolume, the default is next to it
+(`<parent>/.dsb-snapshots`). The helper checks that the snapshot dir is on the same btrfs
+filesystem as the subvolume (by filesystem UUID) and refuses to run otherwise. That is
+the usual case for a **mounted** appdata subvolume (`subvol=@appdata` at
+`/srv/appdata`, or a dedicated btrfs disk), whose parent is another filesystem: set
+`SNAPSHOT_DIR` in the helper to a directory on that same btrfs filesystem (for example a
+second mount of its top level). The helper creates it 0700. It refuses one that is a symlink, is not owned by
+root, or has any group or other access, because the snapshots in it are frozen copies of
+the whole subvolume. Each verb checks this, not only `create`. Example: with `/opt` a subvolume and
+`/opt/appdata` a plain directory in it, the default is `/opt/.dsb-snapshots`, and each
+snapshot is of the `/opt` subvolume.
+
+sudoers, both helpers (`/etc/sudoers.d/docker-backup`, mode `0440`, `visudo -c`):
+
+```
+backupuser ALL=(root) NOPASSWD: /usr/local/sbin/docker-backup-tar-create.sh, /usr/local/sbin/docker-backup-snapshot.sh
+```
+
+doas:
+
+```
+permit nopass backupuser as root cmd /usr/local/sbin/docker-backup-tar-create.sh
+permit nopass backupuser as root cmd /usr/local/sbin/docker-backup-snapshot.sh
+```
+
+config.sh:
+
+```bash
+SNAPSHOT_BACKEND="btrfs"                                     # or auto
+SNAPSHOT_HELPER_PATH="/usr/local/sbin/docker-backup-snapshot.sh"
+```
+
+When the script runs as root (`ELEVATION_CMD=none`, the TrueNAS case), it calls the same
+helper directly. It is the same code path, and the helper still decides the paths.
+
+**Update the tar helper too.** The 0.7.0 tar helper accepts `--from-snapshot` and the
+x-backup declared paths (after `--`). With neither in use, the script passes it exactly
+0.6.0's arguments, so an old tar helper keeps working until a stack declares an
+`x-backup` path or snapshots are turned on. After that, the old helper refuses the new
+arguments and the stack's archive fails: loud, not silent.
 
 ## A note on `root_squash` and the stdout redirect
 

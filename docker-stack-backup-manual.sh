@@ -25,6 +25,9 @@ source "$SCRIPT_DIR/lib.sh"
 [[ -f "$SCRIPT_DIR/config.sh" ]] && source "$SCRIPT_DIR/config.sh"
 
 detect_os
+# Same platform defaults as the nightly (ELEVATION_CMD). Snapshots are not used here: a
+# manual backup stops the stack for the whole archive, as before (USAGE.md "Snapshots").
+apply_platform_defaults
 
 # Dry-run mode flag
 DRY_RUN=false
@@ -580,6 +583,20 @@ backup_stack() {
         log_warning "No running containers in stack $stack_name — archiving as-is"
     fi
     
+    # x-backup tiers, as on a full run: only the `exclude` tier is left out (a manual
+    # backup is taken on purpose, so the weekly tier is in it). Read before the stop;
+    # any problem means a full backup.
+    local xb_file; xb_file=$(mktemp)
+    read_xbackup "$stack_path" "$stack_name" full "$xb_file"
+    rm -f -- "$xb_file"
+    if [[ ${#DECLARED_EXCLUDES[@]} -gt 0 ]]; then
+        echo "  └─ x-backup: leaving out $(join_by ', ' "${DECLARED_EXCLUDES[@]}")"
+        # The manual script writes no status.json; the log is its record of what an
+        # archive leaves out (audit p5a F-05).
+        printf '%s x-backup (manual, full): %s left out %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" \
+            "$(printable "$stack_name")" "$(join_by ', ' "${DECLARED_EXCLUDES[@]}")" >> "$LOG_FILE"
+    fi
+
     mkdir -p "$backup_dir"
     
     # `stop`, not `down`: containers are kept, so the restart is a plain `start` —
@@ -620,9 +637,14 @@ backup_stack() {
     fi
     
     # Written to <stack>.incomplete and renamed on success — see create_archive_atomic.
+    local archived=false
     if create_archive_atomic "$backup_file" \
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | sed 's/^/     /'; then
+        archived=true
+    fi
+    DECLARED_EXCLUDES=()
+    if [[ "$archived" == true ]]; then
         local backup_size; backup_size=$(du_size "$backup_file" -h) || true
         echo -e "  └─ ${GREEN}✓${NC} Backup created: $backup_size"
     else
@@ -808,7 +830,7 @@ main() {
         exit 1
     fi
     
-    if ! validate_numeric_config; then
+    if ! validate_numeric_config || ! validate_platform; then
         exit 1
     fi
     

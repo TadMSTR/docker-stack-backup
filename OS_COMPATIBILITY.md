@@ -43,6 +43,30 @@ The scripts automatically detect the operating system on startup using `/etc/os-
 | Proxmox VE | Proxmox VE | `proxmox` |
 | Other Debian-based | (varies) | `debian` (fallback) |
 
+### Platform profiles
+
+*0.7.0.* `PLATFORM=auto|debian|truenas` (default `auto`) picks **defaults** for the
+settings that differ between the two host types this project runs on. A value set in
+config.sh or the environment always wins.
+
+| Profile | Picked when (auto) | `ELEVATION_CMD` | `SNAPSHOT_BACKEND` |
+|---|---|---|---|
+| `debian` | OS_TYPE `debian`, `ubuntu` or `proxmox` | `sudo` when not root **and** `ELEVATION_HELPER_PATH` is set; otherwise unchanged (`none`) | `auto` |
+| `truenas` | OS_TYPE `truenas`, or `midclt` (the TrueNAS middleware client) is on PATH | `none` (runs as root) | `zfs` |
+| `generic` | anything else | unchanged | unchanged (`none`) |
+
+A snapshot backend that came from a profile is a preference, not a demand: without a
+usable snapshot helper it resolves to `none` (logged, and `snapshot_note` in
+status.json). The same value set in config.sh fails the preflight instead. The run logs
+the resolved profile (`Platform: debian (PLATFORM=auto)`) and writes it to status.json.
+
+**TrueNAS SCALE identification.** No upstream sample of SCALE's `/etc/os-release` was
+found for 0.7.0. A TrueNAS community feature request (Feb 2026, marked accepted) reports
+that SCALE still identifies itself as **Debian** there. So `ID=` alone cannot tell the two
+apart, and detection also checks for `midclt`, plus the older `/etc/version` check in
+`detect_os`. **This is unverified on a real SCALE host**; programme part 6 checks it on
+atlas. If detection is wrong on your host, set `PLATFORM=truenas` explicitly.
+
 ### Viewing OS Detection
 
 When scripts run, they log the detected OS:
@@ -123,12 +147,24 @@ mkdir -p /mnt/datastor/logs
 # Update LOG_FILE paths in scripts to /mnt/datastor/logs/
 ```
 
-**Cron on TrueNAS:**
-```bash
-# Use TrueNAS web UI: System Settings → Advanced → Cron Jobs
-# Or edit directly (persists across reboots)
-# Command: /mnt/datastor/scripts/docker-stack-backup.sh
-```
+**Cron on TrueNAS:** `/etc` (crontabs, `/etc/cron.d`, sudoers) is part of the system
+image: edits there do not survive an upgrade. Add jobs through the middleware instead:
+**System Settings → Advanced → Cron Jobs → Add**.
+
+| Field | Value |
+|---|---|
+| Description | `docker-stack-backup` |
+| Command | `/mnt/<pool>/scripts/docker-stack-backup.sh` (a script on the data pool) |
+| Run As User | `root` (the truenas profile runs as root, `ELEVATION_CMD=none`) |
+| Schedule | e.g. daily 02:00 |
+| Hide Standard Output / Error | as you like; when cleared, TrueNAS mails the output to the user |
+
+Add the cleanup (`cleanup-old-backups.sh <BACKUP_DEST>`) as a second job the same way.
+Because the run is root, keep the scripts in a root-owned directory: a root run from a
+directory another user can write sources that user's `lib.sh`/`config.sh` (the script
+warns about it). There is no sudoers file to maintain on TrueNAS: as root, the script
+calls the snapshot helper directly (`SNAPSHOT_HELPER_PATH`, also on the data pool, also
+root-owned). (Source: TrueNAS SCALE docs, "Advanced Settings Screen" → "Cron Jobs Card".)
 
 ### Proxmox VE
 - **Package manager:** `apt-get`
@@ -160,6 +196,9 @@ apt install pigz pbzip2 pxz zstd
 - `find`
 - `grep`
 - `sed`
+- `python3` (standard library only: status.json, the coverage classifier, x-backup)
+- `setpriv` (util-linux), for the elevation helper (ELEVATION.md); installed by default on Debian and TrueNAS SCALE
+- `btrfs-progs` or ZFS, only for snapshot-assisted backup on that filesystem
 
 ### Optional (for compression)
 - `gzip` (usually pre-installed)

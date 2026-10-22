@@ -1,5 +1,118 @@
 # Changelog
 
+## [0.7.0] — 2026-10-22
+
+Per-stack backup tiers, snapshot-assisted backup and platform profiles: the parts that
+both backends use. Still tar-only; restic arrives in 0.8.0. Programme
+docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
+
+### Added
+
+- **Backup tiers (`x-backup`)**, declared in the stack's own compose file: `exclude`
+  (never backed up) and `weekly` (full run only), each entry with a required reason, plus
+  `retention` (validated; reserved for restic). An undeclared stack is backed up daily,
+  in full, as before. The block is read through `docker compose config --format json`
+  and validated by `dsb_status.py`. Paths are literal and relative, `[A-Za-z0-9._-]`
+  parts, no `.`/`..`/leading `-`. **An invalid block is ignored as a whole:** the stack
+  is backed up in full and reported as `config-error`. Declared paths go to tar anchored
+  and literal, after the global `EXCLUDE_PATTERNS`, whose unanchored glob meaning is
+  unchanged. See USAGE.md, "Backup tiers".
+- **Run kind:** `full` on `FULL_RUN_DAY` (1-7, default 7 = Sunday) or with `--full`, else
+  `daily`. 0.8.0's weekly tar keys off the same function.
+- **Snapshot-assisted backup** (`SNAPSHOT_BACKEND=none|auto|btrfs|zfs`, default `none`):
+  stop → read-only snapshot → start → archive from the snapshot → delete it. Downtime
+  becomes the snapshot time instead of the archive time, and the archive layout is
+  unchanged. A nested btrfs subvolume, ZFS child dataset, mountpoint, unreadable
+  directory, `snapdir=disabled` or any snapshot failure makes that stack fall back to
+  stop-archive-start, and it is never stopped twice. Leftover snapshots are swept at the
+  start of each run. See USAGE.md, "Snapshots".
+- **`docker-backup-snapshot.sh`**, a second root helper (verbs `info`, `check`, `create`,
+  `source`, `delete`, `sweep`). It takes no path from its caller: root-set constants
+  decide every path. The tar helper gains `--from-snapshot <ts>` (it asks the snapshot
+  helper for the path) and an anchored declared-path argument kind after `--`. See
+  ELEVATION.md and SECURITY.md.
+- **Platform profiles** (`PLATFORM=auto|debian|truenas`): defaults for `ELEVATION_CMD`
+  and `SNAPSHOT_BACKEND`, which explicit config always overrides. TrueNAS SCALE is
+  recognised by `midclt`, because its `/etc/os-release` says Debian (unverified on a real
+  host; part 6). OS_COMPATIBILITY.md documents the scheduler per platform.
+- **status.json** (schema 1, additive): run-level `run_kind`, `platform`,
+  `snapshot_backend`, `snapshot_note`. Per stack: `x_backup` and `snapshot`.
+  `coverage.xbackup_config_errors`. A rejected x-backup block makes `coverage.status`
+  `config-error`. `--coverage-report` shows each stack's `x_backup`.
+- **.prom:** `dsb_last_run_kind`, `dsb_stack_xbackup_paths{state}`,
+  `dsb_stack_xbackup_config_error`, `dsb_stack_snapshot_used`, `dsb_snapshot_fallbacks`,
+  `dsb_snapshot_cleanup_failures`, `dsb_snapshot_leftovers_swept`.
+- A snapshot that cannot be deleted, or a failed sweep, is counted in status.json
+  (`snapshot_cleanup`, `snapshot.delete_failed`) and the .prom, and is named in the
+  notification text, not only logged: a leftover pins disk and keeps a frozen copy of
+  the whole subvolume.
+- The dry run prints the run kind, each stack's tiers with their reasons, the resolved
+  snapshot backend and each stack's snapshot plan.
+
+### Changed
+
+- The manual script applies the `exclude` tier (as a full run). It does not use
+  snapshots.
+- **Upgrade note:** with no `x-backup` declaration and no snapshot backend, the tar helper
+  gets exactly 0.6.0's arguments, so an installed 0.6.0 helper keeps working. Once a
+  stack declares paths or snapshots are on, install the 0.7.0 tar helper too; the old
+  one refuses the new arguments, and that stack's archive fails loudly.
+
+### Security
+
+- **The tar helper now refuses a `temp_dir` that is not the caller's own private
+  directory (High, present since 0.4.0).** It used to accept any existing `/tmp/<name>`
+  and `tar -C` into it as root. So a symlink there (or a root-owned directory already in
+  `/tmp`) let anyone holding the NOPASSWD grant read any directory as root. It now
+  requires a real directory (not a symlink), owned by the invoking user (`SUDO_UID` /
+  `DOAS_USER`), mode 0700, as `mktemp -d` makes it, and after `cd -P` the kernel's cwd
+  must be that directory. **Root no longer reads the temp dir at all.** The compose file
+  and `.env` are read as the invoking user (`setpriv`) into a private staging dir, and
+  that is what is archived; that dir stays root's and is never handed to the caller. So
+  no swap, rename or link in the caller's own dir can make root archive anything the
+  caller could not read itself. A drop that fails, or a temp dir with no compose file,
+  fails the archive. The archive's root `./` member is now root-owned. **Reinstall the tar helper on
+  every host that grants it**, even if you use none of 0.7.0's other features.
+- The snapshot helper refuses to run when a mount sits between the subvolume it would
+  snapshot and the appdata root. A snapshot would show what is under that mount, not the
+  mounted data.
+- `create` repeats the boundary check after the stop. On btrfs it also looks inside the
+  new snapshot for the empty placeholder (inode 2) that a nested subvolume leaves, and
+  falls back if it finds one, so a subvolume made after `check` cannot be silently left
+  out.
+- A snapshot `create` took and could not delete again (after finding a nested subvolume
+  in it) is reported with its own exit code and counted as a cleanup failure, not
+  silently left for the next sweep.
+- The snapshot dir must be on the same btrfs filesystem as the snapshotted subvolume,
+  checked at `info`, so a mounted appdata subvolume with an unusable default is reported
+  at the preflight, not as a failed snapshot after every stop.
+- The tar helper checks the snapshot helper before running it as root: a regular file,
+  not a symlink, root-owned, not group or other writable. It also checks that both
+  helpers agree on the appdata root, and that `source` points inside that exact
+  snapshot.
+
+### Fixed
+
+- The default btrfs snapshot dir, when the appdata root is itself a subvolume, is now next
+  to it. Before, it was inside the appdata root and was refused for every verb.
+- An in-flight snapshot is deleted before an aborted run's status is written, so a failed
+  delete is counted in that run's record.
+- **#1186:** `LOCK_FILE` is no longer opened through a symlink or truncated on open. A
+  symlink or non-regular file is refused. The file is opened without `O_TRUNC`. The
+  opened fd's inode must match an `lstat` of the path (a swap in between is refused),
+  and the PID is written through the fd. A root run could previously be made to truncate
+  any file a symlink in `~/run` pointed at.
+- **STATUS.md example alert** `DockerStackBackupUncovered` added bare series to
+  `sum by (host)` results, which never match once `job`/`instance` labels exist, so the
+  alert could not fire. Every term is now aggregated, and it includes the x-backup
+  config-error gauge (p4 finding).
+- The tar helper pins `PATH` (as the snapshot helper does): tar looks up its compressor
+  there, and a root or doas run inherited the caller's.
+- **Root helpers pin `LC_ALL=C`.** In a UTF-8 locale, bash's `[A-Za-z]` follows
+  collation and matched letters such as `é`. sudo keeps `LANG`/`LC_*` by default, so the
+  tar helper's stack-name check was locale-dependent. Found by the new path-rule parity
+  test.
+
 ## [0.6.0] — 2026-10-18
 
 Every run now says what it did in a machine-readable form, including what it did **not**

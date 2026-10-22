@@ -7,6 +7,8 @@ Detailed instructions for configuring and using the Docker Stack Backup & Restor
 1. [Initial Setup](#initial-setup)
 2. [Configuration](#configuration)
 3. [Running Backups](#running-backups)
+   - [Backup tiers (`x-backup`)](#backup-tiers-x-backup)
+   - [Snapshots](#snapshots)
 4. [Restoring from Backup](#restoring-from-backup)
 5. [Verification & Maintenance](#verification--maintenance)
 6. [Automation](#automation)
@@ -237,6 +239,128 @@ Select stacks to backup: 1 2 4
 - Individual: `1 3 5`
 - Ranges: `1-3 5-7`
 - All with appdata: `all`
+
+### Backup tiers (`x-backup`)
+
+*0.7.0.* By default every stack that binds `APPDATA_PATH` is backed up **daily, in
+full**. A stack can narrow that in its own compose file, with a top-level `x-backup:`
+block. Compose ignores `x-` keys, so the stack itself is unaffected.
+
+```yaml
+x-backup:
+  exclude:                 # never backed up
+    - path: ollama/models/blobs
+      reason: "re-download with ollama pull; manifests are kept"
+  weekly:                  # backed up on the full run only
+    - path: search/index
+      reason: "rebuilt by reindex; a week's loss is acceptable"
+  retention:               # reserved for the restic backend (0.8.0); validated, not used yet
+    daily: 7
+    weekly: 4
+    monthly: 6
+```
+
+- **`path`** is relative to `$APPDATA_PATH/<stack>` and is a **literal** path, not a
+  pattern. Each `/`-separated part may use only `A-Z a-z 0-9 . _ -`. Paths that are
+  empty, contain `.`, `..` or a part starting with `-`, start with `/`, or exceed 255
+  bytes are refused. A path leaves out that file or directory **and everything under
+  it**, and nothing else: `models/blobs` does not touch `models/blobs2` or
+  `other/models/blobs`.
+- **`reason`** is required (≤ 200 characters, no control characters). It is reported in
+  `status.json` and printed by the dry run. Compose interpolates `${VAR}` in it, so write
+  `$$` for a literal `$`.
+- At most 64 entries per list. A path may be in one list only. Unknown keys are errors.
+- **Run kind.** A run is `full` on `FULL_RUN_DAY` (1 = Monday … 7 = Sunday, default 7)
+  or with `--full`, and `daily` otherwise. A daily run leaves out both lists (the
+  weekly list is reported as *deferred*). A full run leaves out only `exclude`. The
+  manual script always backs up as a full run.
+
+**A declaration can only narrow a backup, and an invalid one narrows nothing.** If the
+block has any error, the whole block is ignored: the stack is backed up in full, the
+errors go to the log, and the stack's `x_backup.status` is `config-error`, which makes the
+run's `coverage.status` `config-error` (STATUS.md) and sets
+`dsb_stack_xbackup_config_error`. A declared path that does not exist is reported as
+*stale*, but is not an error.
+
+The block is read through `docker compose config --format json`, the same reader the
+coverage classifier uses. It is never parsed as YAML here and never sourced. The global
+`EXCLUDE_PATTERNS` keep their meaning: unanchored globs that match at any depth in every
+stack. The two kinds do not interfere (`tests/xbackup-tar.bats`).
+
+Check a declaration before the nightly picks it up:
+
+```bash
+./docker-stack-backup.sh --dry-run          # per stack: the tiers, with their reasons
+./docker-stack-backup.sh --coverage-report  # per stack: "x_backup": {...}
+```
+
+**Example: ollama.** `models/blobs` holds every model's layers (forge: 18 GB) and
+`models/manifests` says which ones to pull. The path is relative to the stack's appdata
+dir: forge mounts `/opt/appdata/ollama/ollama:/root/.ollama`, so there it is
+`ollama/models/blobs`. Check it with `--dry-run`: a path that does not exist is listed
+as *stale* (and excludes nothing). Library models come back with
+`ollama pull <name>`, so `exclude: models/blobs` is safe for them, **but a custom model
+(one built with `ollama create` from a Modelfile) has its layers only in `blobs`.** Put
+its Modelfile in git first (`ollama show --modelfile <name> > <name>.Modelfile`). A
+restore then needs `ollama pull` for each library model and `ollama create` for each
+custom one.
+
+### Snapshots
+
+*0.7.0.* Without snapshots, a running stack is stopped for as long as its archive takes to
+write (forge: up to about 3 minutes for the largest). With a snapshot backend it is
+stopped only while a read-only snapshot is taken, then started, and the archive is read
+from the snapshot:
+
+```
+stop → snapshot → start → archive from the snapshot → delete the snapshot
+```
+
+`downtime_s` in status.json then covers only stop → started. The archive is
+**identical in layout**: the same `<stack>/…` member names, the compose file and `.env`
+at the root, so restore, verify and cleanup are unchanged.
+
+| Setting | Values | Default |
+|---|---|---|
+| `SNAPSHOT_BACKEND` | `none`, `auto`, `btrfs`, `zfs` | `none` (the Debian profile picks `auto`, TrueNAS `zfs`; see `PLATFORM`) |
+| `SNAPSHOT_HELPER_PATH` | path of the installed `docker-backup-snapshot.sh` | empty |
+
+Snapshots need the root-owned snapshot helper (ELEVATION.md, "The snapshot helper"),
+which holds the snapshot settings itself (appdata root, backend, snapshot dir). The script
+checks that the helper's appdata root equals `APPDATA_PATH` before it uses it.
+
+- An **explicit** `btrfs` or `zfs` in config.sh that cannot work (wrong filesystem, no
+  helper, a helper set up for another root) **fails the preflight**.
+- `auto`, or a backend that came from the platform profile, falls back to `none` instead.
+  The reason is logged and written to `status.json` as `snapshot_note`. So upgrading to
+  0.7.0 without installing the helper changes nothing.
+
+**A snapshot that hides data is worse than downtime.** A btrfs snapshot shows a nested
+subvolume as an empty directory, and a ZFS snapshot leaves out child datasets. Before it
+stops a stack, the run asks the helper to check the stack's appdata. That covers the
+stack dir itself and everything under it. A nested btrfs subvolume, a ZFS child dataset
+or any other mountpoint makes that stack fall back to the old stop-archive-start
+(`fallback_reason`). So does a directory the check cannot read, ZFS `snapdir=disabled`
+(the snapshot cannot be read), or a failed snapshot. The stack is never stopped twice.
+
+Other behaviour:
+
+- A stopped stack is archived live, with no snapshot: there is nothing to quiesce.
+- The snapshot is deleted after its archive, whether the archive worked or not, and on
+  any exit or signal.
+- Each run first sweeps leftover `dsb-<stack>-<timestamp>` snapshots from runs that died,
+  and logs each one. Nothing else in the snapshot dir or dataset is touched. The sweep
+  covers every `dsb-*` snapshot the helper manages, while the run lock is per
+  `LOCK_FILE`. So use **one** schedule (one config) per helper: two configs sharing a
+  helper with different `LOCK_FILE`s would sweep each other's in-flight snapshots.
+- A delete that fails, or a sweep that fails, is counted in `snapshot_cleanup.failed`
+  (status.json), in `dsb_snapshot_cleanup_failures`, and in the notification text.
+- If the stack fails to start again after the snapshot, the archive is still made (the
+  snapshot holds the quiesced data), and the stack is reported `failed` / `restart-failed`
+  as before.
+
+The manual script does not use snapshots: it is run by hand, for a few stacks, and keeps
+the plain stop-archive-start.
 
 ---
 

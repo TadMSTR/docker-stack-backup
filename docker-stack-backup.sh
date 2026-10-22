@@ -28,6 +28,9 @@ source "$SCRIPT_DIR/lib.sh"
 [[ -f "$SCRIPT_DIR/config.sh" ]] && source "$SCRIPT_DIR/config.sh"
 
 detect_os
+# Platform profile defaults (PLATFORM=auto|debian|truenas): ELEVATION_CMD and
+# SNAPSHOT_BACKEND, when config.sh leaves them unset. Before the defaults below.
+apply_platform_defaults
 
 # Dry-run mode flag
 DRY_RUN=false
@@ -104,6 +107,24 @@ NTFY_URGENT_ONLY="${NTFY_URGENT_ONLY:-false}"
 ELEVATION_CMD="${ELEVATION_CMD:-none}"
 ELEVATION_HELPER_PATH="${ELEVATION_HELPER_PATH:-}"
 
+# Snapshot-assisted backup (USAGE.md "Snapshots"). SNAPSHOT_BACKEND=none|auto|btrfs|zfs;
+# none unless config.sh or the platform profile says otherwise. Snapshots also need the
+# root-owned snapshot helper (ELEVATION.md).
+SNAPSHOT_HELPER_PATH="${SNAPSHOT_HELPER_PATH:-}"
+SNAPSHOT_RESOLVED=none
+SNAPSHOT_NOTE=""
+# Stack whose snapshot (dsb-<stack>-<TIMESTAMP>) exists right now; on_exit deletes it.
+SNAPSHOT_INFLIGHT=""
+# Snapshot cleanup this run: deletes that failed (+1 if the start-of-run sweep failed),
+# and leftovers the sweep removed. Both go to status.json, the .prom and the notification.
+SNAPSHOT_CLEANUP_FAILED=0
+SNAPSHOT_SWEPT=0
+STACK_SNAPSHOT_DELETE_FAILED=0
+
+# Run kind (lib.sh resolve_run_kind): full on FULL_RUN_DAY or with --full, else daily.
+FORCE_FULL_RUN=false
+RUN_KIND=daily
+
 # Status contract (see STATUS.md). status.json is a regular file next to the run dirs:
 # restore, verify and cleanup enumerate only directories there, so a file is invisible
 # to them, where a directory would be counted as a run and deleted by retention.
@@ -152,10 +173,27 @@ STACK_TMP=""
 lock_for_status() {
     [[ "${LOCK_HELD:-false}" == true ]] && return 0
     [[ -n "${LOCK_FILE:-}" ]] || return 1
-    local fd
-    exec {fd}>>"$LOCK_FILE" || return 1
-    flock -n "$fd" || return 1
+    open_lock_file || return 1
+    flock -n "$LOCK_FD" || return 1
     LOCK_HELD=true
+}
+
+# Deletes the in-flight snapshot, if any. A failure is logged; the next run's sweep
+# removes what is left.
+delete_inflight_snapshot() {
+    [[ -n "$SNAPSHOT_INFLIGHT" ]] || return 0
+    local stack="$SNAPSHOT_INFLIGHT"
+    SNAPSHOT_INFLIGHT=""
+    if snapshot_helper delete "$stack" "$TIMESTAMP" 2>>"$LOG_FILE"; then
+        log "Snapshot deleted: dsb-$stack-$TIMESTAMP"
+    else
+        log_warning "Could not delete snapshot dsb-$stack-$TIMESTAMP; the next run's sweep removes it"
+        # Reported in status.json, the .prom and the notification: a snapshot that is
+        # never deleted pins disk and keeps a frozen copy of the whole subvolume.
+        SNAPSHOT_CLEANUP_FAILED=$((SNAPSHOT_CLEANUP_FAILED + 1))
+        STACK_SNAPSHOT_DELETE_FAILED=1
+        return 1
+    fi
 }
 
 # One EXIT handler: write the abort status (if the run was armed and never finished),
@@ -164,6 +202,8 @@ lock_for_status() {
 on_exit() {
     local rc=$?
     trap - EXIT
+    # Before the abort record is written, so a failed delete is counted in it (CR-03).
+    delete_inflight_snapshot || true
     if [[ "$STATUS_ARMED" == true && "$STATUS_DONE" != true ]]; then
         if lock_for_status 2>/dev/null; then
             write_run_status "${ABORT_REASON:-interrupted}" || true
@@ -336,6 +376,16 @@ run_preflight_checks() {
     if ! check_disk_space "$BACKUP_DEST"; then
         checks_passed=false
     fi
+
+    # Snapshot backend: an explicit SNAPSHOT_BACKEND that cannot work fails here; auto or
+    # a profile default falls back to none, reported.
+    if ! resolve_snapshot_backend; then
+        checks_passed=false
+    elif [[ "$SNAPSHOT_RESOLVED" != none ]]; then
+        log "✓ Snapshot backend: $SNAPSHOT_RESOLVED (helper: $SNAPSHOT_HELPER_PATH)"
+    elif [[ -n "$SNAPSHOT_NOTE" ]]; then
+        log_warning "Snapshots not used ($SNAPSHOT_NOTE); stacks are archived while stopped"
+    fi
     
     if [[ "$checks_passed" == false ]]; then
         log_error "Pre-flight checks failed!"
@@ -365,6 +415,7 @@ log_status_diagnostics() {
 }
 
 # record_stack <name> <result> <reason> <mode> <archive> <bytes> <started> <finished> <downtime>
+#              [--xbackup FILE] [--snapshot-backend B --snapshot-used 0|1 ...]
 record_stack() {
     [[ "$STATUS_ARMED" == true && -n "$RUN_TMP" ]] || return 0
     command -v python3 >/dev/null 2>&1 || return 0   # write_run_status reports it
@@ -398,6 +449,9 @@ write_run_status() {
         --prom-dir "$PROM_TEXTFILE_DIR" \
         --host "$HOSTNAME" --run-id "$TIMESTAMP" --version "$DSB_VERSION" \
         --started "${RUN_STARTED:-}" --dest "$BACKUP_DEST" \
+        --run-kind "$RUN_KIND" --platform "${RESOLVED_PLATFORM:-}" \
+        --snapshot-backend "$SNAPSHOT_RESOLVED" --snapshot-note "$SNAPSHOT_NOTE" \
+        --snapshot-cleanup-failed "$SNAPSHOT_CLEANUP_FAILED" --snapshot-swept "$SNAPSHOT_SWEPT" \
         --aborted "$aborted" 2>"$diag") || rc=$?
     [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$RUN_TMP/diag"
     [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$diag"
@@ -535,6 +589,25 @@ simulate_backup_stack() {
     else
         echo -e "  ${YELLOW}○${NC} $stack_name ($size appdata, stopped — archived without stop/start)"
     fi
+
+    # x-backup tiers, as this run would apply them (sizes above are before exclusion)
+    local xb_file; xb_file=$(mktemp "$RUN_TMP/xbackup.XXXXXX")
+    read_xbackup "$stack_path" "$stack_name" "$RUN_KIND" "$xb_file"
+    local line
+    while IFS= read -r line; do
+        echo "      $line"
+    done < <(dsb_status xbackup-describe "$xb_file" 2>/dev/null)
+
+    # Snapshot plan
+    if [[ "$SNAPSHOT_RESOLVED" != none && $running_count -gt 0 ]]; then
+        local check_out=""
+        check_out=$(snapshot_helper check "$stack_name" 2>/dev/null) || check_out="fallback check-failed"
+        if [[ "$check_out" == ok ]]; then
+            echo "      snapshot: $SNAPSHOT_RESOLVED (stopped only while the snapshot is taken)"
+        else
+            echo "      snapshot: no, $(printable "${check_out#fallback }") (archived while stopped)"
+        fi
+    fi
     
     # Size for the total, through a global like STACK_SKIP_REASON. It used to go through
     # /tmp/stack_size_$$, a predictable name: a file planted there by another user survives
@@ -568,6 +641,9 @@ backup_stack() {
     STACK_ARCHIVE=""
     STACK_ARCHIVE_BYTES=""
     STACK_DOWNTIME_S=""
+    STACK_RECORD_OPTS=()
+    DECLARED_EXCLUDES=()
+    STACK_SNAPSHOT_DELETE_FAILED=0
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
@@ -636,6 +712,35 @@ backup_stack() {
         log "Running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
     fi
     
+    # The stack's x-backup tiers (USAGE.md "Backup tiers"), read once, before anything is
+    # stopped. Any problem leaves DECLARED_EXCLUDES empty: a full backup.
+    local xb_file; xb_file=$(mktemp "$RUN_TMP/xbackup.XXXXXX")
+    read_xbackup "$stack_path" "$stack_name" "$RUN_KIND" "$xb_file"
+    STACK_RECORD_OPTS+=(--xbackup "$xb_file")
+    if [[ ${#DECLARED_EXCLUDES[@]} -gt 0 ]]; then
+        log "x-backup ($RUN_KIND run): leaving out $(join_by ', ' "${DECLARED_EXCLUDES[@]}")"
+    fi
+
+    # Snapshot, or the old way? Decided before the stop, so the stack is stopped once.
+    # A stopped stack is archived live: there is nothing to quiesce.
+    local use_snapshot=false snap_fallback="" snap_s=""
+    if [[ "$SNAPSHOT_RESOLVED" != none && -n "$running_containers" ]]; then
+        local check_out=""
+        if check_out=$(snapshot_helper check "$stack_name" 2>>"$LOG_FILE"); then
+            case "$check_out" in
+                ok) use_snapshot=true ;;
+                "fallback nested-subvolume"|"fallback nested-dataset"|"fallback mountpoint"|"fallback snapdir-disabled")
+                    snap_fallback="${check_out#fallback }" ;;
+                *) snap_fallback=check-failed ;;
+            esac
+        else
+            snap_fallback=check-failed
+        fi
+        if [[ -n "$snap_fallback" ]]; then
+            log_warning "No snapshot for $stack_name ($snap_fallback): archiving while it is stopped"
+        fi
+    fi
+
     mkdir -p "$backup_dir"
     
     # `stop`, not `down`: the containers are kept, so the restart below is a plain
@@ -647,9 +752,59 @@ backup_stack() {
         if ! (cd "$stack_path" && docker compose stop); then
             log_error "Failed to stop stack $stack_name"
             STACK_FAIL_POINT="stop-failed"
+            # No snapshot was taken: the stop failed before it (CR-04).
+            snapshot_record_opts false "$snap_fallback" ""
             # A partial stop leaves some services down; bring back what was running.
             restart_stack_with_retry "$stack_path" "$running_containers" || true
             return 1
+        fi
+    fi
+
+    # stop -> snapshot -> start: the archive is then read from the snapshot while the
+    # stack runs again. A failed snapshot leaves the stack stopped: archive it the old way
+    # (it is never stopped twice).
+    if [[ "$use_snapshot" == true ]]; then
+        local snap_t0; snap_t0=$(date +%s)
+        SNAPSHOT_INFLIGHT="$stack_name"
+        local create_out="" create_rc=0
+        create_out=$(snapshot_helper create "$stack_name" "$TIMESTAMP" 2>>"$LOG_FILE") || create_rc=$?
+        if [[ $create_rc -eq 0 ]]; then
+            snap_s=$(( $(date +%s) - snap_t0 ))
+            log "Snapshot taken: dsb-$stack_name-$TIMESTAMP (${snap_s}s)"
+        else
+            use_snapshot=false
+            # Exit 3: a boundary appeared after the check (the helper has removed any
+            # snapshot it took); 4: the same, or a snapshot walk failure, but the snapshot
+            # it took is still there. Anything else: the snapshot itself failed.
+            case "$create_rc:$create_out" in
+                [34]":fallback nested-subvolume"|"3:fallback nested-dataset"|"3:fallback mountpoint")
+                    snap_fallback="${create_out#fallback }" ;;
+                *)  snap_fallback=create-failed ;;
+            esac
+            log_warning "Snapshot of $stack_name not used ($snap_fallback): archiving while it is stopped"
+            if [[ $create_rc -eq 4 ]]; then
+                # The helper took a snapshot and could not delete it: one more try, and a
+                # failure is counted like any other (audit p5a R2-02).
+                delete_inflight_snapshot || true
+            else
+                # In case it was half made; quietly, as there is usually nothing to delete.
+                snapshot_helper delete "$stack_name" "$TIMESTAMP" 2>/dev/null || true
+                SNAPSHOT_INFLIGHT=""
+            fi
+        fi
+    fi
+
+    local restart_failed=false
+    if [[ "$use_snapshot" == true ]]; then
+        log "Starting previously running containers: $(echo "$running_containers" | tr '\n' ', ' | sed 's/,$//')"
+        if restart_stack_with_retry "$stack_path" "$running_containers"; then
+            STACK_DOWNTIME_S=$(( $(date +%s) - stop_epoch ))
+            run_post_restart_hooks "$stack_name" "$stack_path"
+        else
+            # restart_stack_with_retry already logged and notified. The snapshot holds the
+            # quiesced data, so the archive is still made.
+            restart_failed=true
+            STACK_FAIL_POINT="restart-failed"
         fi
     fi
     
@@ -685,21 +840,46 @@ backup_stack() {
     fi
     
     # Written to <stack>.incomplete and renamed on success — see create_archive_atomic.
+    # From the snapshot, the member names are the same <stack>/… as from the live dir.
+    local archived=false
+    # shellcheck disable=SC2034  # ARCHIVE_SNAPSHOT_TS is read by create_compressed_archive (lib.sh)
+    [[ "$use_snapshot" == true ]] && ARCHIVE_SNAPSHOT_TS="$TIMESTAMP"
     if create_archive_atomic "$backup_file" \
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | tee -a "$LOG_FILE"; then
+        archived=true
+    fi
+    # shellcheck disable=SC2034  # read by create_compressed_archive (lib.sh)
+    ARCHIVE_SNAPSHOT_TS=""
+    DECLARED_EXCLUDES=()
+    if [[ "$use_snapshot" == true ]]; then
+        delete_inflight_snapshot || true
+    fi
+    snapshot_record_opts "$use_snapshot" "$snap_fallback" "$snap_s"
+
+    if [[ "$archived" == true ]]; then
         log_success "Backup created: $backup_file"
         STACK_ARCHIVE="$TIMESTAMP/${stack_name}${backup_ext}"
         STACK_ARCHIVE_BYTES=$(stat -c %s -- "$backup_file" 2>/dev/null) || STACK_ARCHIVE_BYTES=""
     else
         log_error "Failed to create backup for $stack_name"
-        STACK_FAIL_POINT="archive-failed"
-        # Restore only previously running containers
-        if [[ -n "$running_containers" ]]; then
+        [[ "$restart_failed" == true ]] || STACK_FAIL_POINT="archive-failed"
+        # Restore only previously running containers (already running again after a
+        # snapshot)
+        if [[ -n "$running_containers" && "$use_snapshot" != true ]]; then
             log "Restoring previously running containers"
             restart_stack_with_retry "$stack_path" "$running_containers" || true
         fi
         return 1
+    fi
+
+    if [[ "$use_snapshot" == true ]]; then
+        if [[ "$restart_failed" == true ]]; then
+            return 1
+        fi
+        STACK_BACKUP_MODE="running"
+        log_success "Stack $stack_name backed up from a snapshot and restarted successfully"
+        return 0
     fi
     
     if [[ -z "$running_containers" ]]; then
@@ -726,6 +906,17 @@ backup_stack() {
     return 0
 }
 
+# snapshot_record_opts <used:true|false> <fallback_reason> <snapshot_s> — the snapshot
+# part of this stack's status record, when a snapshot backend is in use.
+snapshot_record_opts() {
+    [[ "$SNAPSHOT_RESOLVED" != none ]] || return 0
+    local used=0
+    [[ "$1" == true ]] && used=1
+    STACK_RECORD_OPTS+=(--snapshot-backend "$SNAPSHOT_RESOLVED" --snapshot-used "$used"
+        --snapshot-fallback "$2" --snapshot-s "$3"
+        --snapshot-delete-failed "$STACK_SNAPSHOT_DELETE_FAILED")
+}
+
 #######################################
 # Main function
 #######################################
@@ -742,6 +933,11 @@ main() {
                 coverage_report=true
                 shift
                 ;;
+            --full)
+                # shellcheck disable=SC2034  # read by resolve_run_kind (lib.sh)
+                FORCE_FULL_RUN=true
+                shift
+                ;;
             --help|-h)
                 echo "Usage: $0 [OPTIONS]"
                 echo ""
@@ -749,6 +945,8 @@ main() {
                 echo "  --dry-run, -n       Simulate backup without making changes"
                 echo "  --coverage-report   Print the coverage classifier's JSON for every stack"
                 echo "                      (read-only: stops, archives and writes nothing)"
+                echo "  --full              A full run: x-backup weekly-tier paths are backed up"
+                echo "                      too (default: full on FULL_RUN_DAY, else daily)"
                 echo "  --help, -h          Show this help message"
                 echo ""
                 echo "Examples:"
@@ -764,17 +962,22 @@ main() {
         esac
     done
     
+    RUN_KIND=$(resolve_run_kind)
+
     if [[ "$coverage_report" == true ]]; then
         # stdout is the JSON only: no lock is taken, so release_lock logs nothing at exit.
         run_coverage_report
         exit $?
     fi
 
+    # Private scratch for the run: per-stack x-backup results and status records.
+    # on_exit removes it.
+    RUN_TMP=$(mktemp -d)
+
     # A real run records its outcome, aborts included; a dry run never does.
     if [[ "$DRY_RUN" != true ]] && \
        [[ "$STATUS_ENABLED" == true || -n "$PROM_TEXTFILE_DIR" || -n "$PING_URL" ]]; then
         RUN_STARTED=$(date +%s)
-        RUN_TMP=$(mktemp -d)
         STATUS_ARMED=true
     fi
 
@@ -793,6 +996,8 @@ main() {
     log "Version: docker-stack-backup $DSB_VERSION"
     log "Hostname: $HOSTNAME"
     log "OS: $OS_NAME ($OS_TYPE)"
+    log "Platform: ${RESOLVED_PLATFORM:-generic} (PLATFORM=$(printable "${PLATFORM:-auto}"))"
+    log "Run kind: $RUN_KIND (full on day $(printable "${FULL_RUN_DAY:-7}") of the week, or with --full)"
     log "========================================="
     
     # Require root, unless ELEVATION_CMD is configured to elevate archive creation
@@ -801,7 +1006,7 @@ main() {
         exit 1
     fi
     
-    if ! validate_numeric_config; then
+    if ! validate_numeric_config || ! validate_platform; then
         ABORT_REASON="invalid-config"
         exit 1
     fi
@@ -818,6 +1023,24 @@ main() {
         log_error "Pre-flight checks failed, aborting"
         ABORT_REASON="preflight-failed"
         exit 1
+    fi
+
+    # Snapshots left by an earlier run that died before deleting them. Only after the
+    # lock is held: never one of a run still going.
+    if [[ "$DRY_RUN" != true && "$SNAPSHOT_RESOLVED" != none ]]; then
+        local swept="" name
+        if swept=$(snapshot_helper sweep 2>>"$LOG_FILE"); then
+            :
+        else
+            log_warning "Snapshot sweep did not finish (see above); continuing"
+            SNAPSHOT_CLEANUP_FAILED=$((SNAPSHOT_CLEANUP_FAILED + 1))
+        fi
+        while IFS= read -r name; do
+            if [[ -n "$name" ]]; then
+                log_warning "Removed leftover snapshot: $(printable "$name")"
+                SNAPSHOT_SWEPT=$((SNAPSHOT_SWEPT + 1))
+            fi
+        done <<< "$swept"
     fi
     
     # Counter for statistics
@@ -896,6 +1119,8 @@ main() {
         echo -e "  Estimated backup size: ${BOLD}$total_size_human${NC}"
         echo "  Compression method: ${COMPRESSION_METHOD}"
         echo "  Backup extension: ${backup_ext}"
+        echo "  Run kind: ${RUN_KIND}"
+        echo "  Snapshot backend: ${SNAPSHOT_RESOLVED}${SNAPSHOT_NOTE:+ ($SNAPSHOT_NOTE)}"
         echo ""
         
         # Check if there's enough space
@@ -918,6 +1143,7 @@ main() {
         log "Dry run complete"
         log "Would backup: $backed_up stacks"
         log "Estimated size: $total_size_human"
+        log "Run kind: $RUN_KIND; snapshot backend: $SNAPSHOT_RESOLVED"
         log "========================================="
         
         return 0
@@ -959,7 +1185,8 @@ main() {
         fi
         record_stack "$stack_name" "$rec_result" "$rec_reason" "${STACK_BACKUP_MODE:-}" \
             "${STACK_ARCHIVE:-}" "${STACK_ARCHIVE_BYTES:-}" "$stack_started" \
-            "$stack_finished" "${STACK_DOWNTIME_S:-}"
+            "$stack_finished" "${STACK_DOWNTIME_S:-}" \
+            "${STACK_RECORD_OPTS[@]+"${STACK_RECORD_OPTS[@]}"}"
         if [[ -n "$PENDING_SIGNAL" ]]; then
             log_error "Stopping after $stack_name on a signal; the remaining stacks are not backed up"
             ABORT_REASON="interrupted"
@@ -997,6 +1224,9 @@ main() {
     if [[ ${#failed_names[@]} -gt 0 ]]; then
         details+="Failed: $(join_by ', ' "${failed_names[@]}")"$'\n'
     fi
+    if [[ $SNAPSHOT_CLEANUP_FAILED -gt 0 ]]; then
+        details+="Snapshot cleanup failed: $SNAPSHOT_CLEANUP_FAILED (leftover snapshots pin disk; see the log)"$'\n'
+    fi
     details="${details%$'\n'}"
     
     # The count lines keep their pre-0.5.0 wording so existing log readers still
@@ -1015,6 +1245,9 @@ main() {
     fi
     if [[ ${#failed_names[@]} -gt 0 ]]; then
         log "Failed stacks: $(join_by ', ' "${failed_names[@]}")"
+    fi
+    if [[ $SNAPSHOT_CLEANUP_FAILED -gt 0 ]]; then
+        log_warning "Snapshot cleanup failed: $SNAPSHOT_CLEANUP_FAILED"
     fi
     log "========================================="
     
@@ -1057,7 +1290,7 @@ run_coverage_report() {
         names+=("$(basename "$stack_path")")
     done
     dsb_status coverage-report \
-        --stack-base "$stack_base" --appdata "$APPDATA_PATH" \
+        --stack-base "$stack_base" --appdata "$APPDATA_PATH" --run-kind "$RUN_KIND" \
         --exemptions "$COVERAGE_EXEMPTIONS_FILE" \
         --ignore-paths "$COVERAGE_IGNORE_PATHS" \
         -- "${names[@]+"${names[@]}"}"
