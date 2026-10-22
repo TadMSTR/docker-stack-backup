@@ -220,9 +220,12 @@ STUB
 }
 
 @test "two signals during the archive: exit at once, and the snapshot is still deleted" {
-    export STUB_SIGNAL_ON_ARCHIVE="TERM TERM"
+    # The first signal is deferred at `stop`, the second arrives during the archive
+    # (two signals at one point coalesce, as the same signal is not queued twice).
+    export STUB_SIGNAL_ON_STOP=INT STUB_SIGNAL_ON_ARCHIVE=TERM
     run_backup
     [ "$status" -eq 143 ]
+    [[ "$output" == *"Second signal: exiting during $STACK"* ]]
     grep -q "^sudo docker-backup-snapshot.sh delete $STACK " "$DOCKER_LOG"
     [ "$(snapshots_left)" -eq 0 ]
     [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
@@ -231,9 +234,13 @@ STUB
 }
 
 @test "two signals and a delete that fails: the abort record counts it (CR-03)" {
-    export STUB_SIGNAL_ON_ARCHIVE="TERM TERM" STUB_SNAP_DELETE_RC=1
+    # The first signal is deferred at `stop`; the second exits during `compose start`,
+    # while the snapshot exists. The exit handler is what deletes it, so the abort record
+    # must be written after that delete.
+    export STUB_SIGNAL_ON_STOP=INT STUB_SIGNAL_ON_START=TERM STUB_SNAP_DELETE_RC=1
     run_backup
     [ "$status" -eq 143 ]
+    [[ "$output" == *"Second signal: exiting during $STACK"* ]]
     [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
     [ "$(js "$STATUS" 'd["snapshot_cleanup"]["failed"]')" = 1 ]
     grep -qx "dsb_snapshot_cleanup_failures{host=\"$HOST\"} 1" "$PROM"
