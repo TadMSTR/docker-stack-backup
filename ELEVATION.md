@@ -103,6 +103,12 @@ When it is `sudo` or `doas`, `create_compressed_archive()` calls:
     [--from-snapshot <ts>] [excludes…] [-- <stack_name>/<declared_path>…] > <output_file>
 ```
 
+`temp_dir` must be the caller's own private directory, as `mktemp -d` makes it: a real
+directory directly under `/tmp` (not a symlink), owned by the invoking user (`SUDO_UID`
+under sudo, `DOAS_USER` under doas), mode 0700. The helper enters it with `cd -P`,
+checks `.` and archives `-C .`. Before 0.7.0 any existing `/tmp/<name>` was accepted,
+which let the grant read any directory as root; reinstall the helper.
+
 `excludes` are the global `EXCLUDE_PATTERNS` (unanchored globs). After `--` come the
 stack's x-backup declared paths (0.7.0), which the helper re-validates and passes to tar
 anchored and literal (`--anchored --no-wildcards`), after the globs, so they cannot change
@@ -194,8 +200,14 @@ sudoedit /usr/local/sbin/docker-backup-snapshot.sh
 If the snapshot helper is not at `/usr/local/sbin/docker-backup-snapshot.sh`, also set
 `SNAPSHOT_HELPER` in the installed **tar** helper.
 
+The appdata root must be on the subvolume the helper snapshots, with no mount in
+between: if `findmnt --target <appdata root>` names a mount below that subvolume (a bind
+mount, or a `subvol=` mount of a plain directory), the helper refuses to run, because a
+snapshot would show the directory under that mount.
+
 `SNAPSHOT_DIR` must be on the same btrfs filesystem and must not be under the appdata
-root. The helper creates it 0700. It refuses one that is a symlink, is not owned by
+root. When the appdata root is itself a subvolume, the default is next to it
+(`<parent>/.dsb-snapshots`). The helper creates it 0700. It refuses one that is a symlink, is not owned by
 root, or has any group or other access, because the snapshots in it are frozen copies of
 the whole subvolume. Each verb checks this, not only `create`. Example: with `/opt` a subvolume and
 `/opt/appdata` a plain directory in it, the default is `/opt/.dsb-snapshots`, and each

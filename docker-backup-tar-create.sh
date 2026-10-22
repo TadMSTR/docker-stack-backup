@@ -76,6 +76,26 @@ esac
 [[ "$temp_dir" =~ ^/tmp/[^/]+$ ]] || { echo "docker-backup-tar-create: invalid temp_dir: $temp_dir" >&2; exit 2; }
 [[ -d "$temp_dir" ]] || { echo "docker-backup-tar-create: temp_dir does not exist: $temp_dir" >&2; exit 2; }
 
+# The temp dir must be the caller's own private dir (what `mktemp -d` makes), not just
+# any /tmp/<name>: a symlink there, or a root-owned dir already in /tmp (PrivateTmp
+# dirs), made root archive any directory it pointed at into the caller's stdout (audit
+# p5a F-01). Who the caller is: sudo sets SUDO_UID and doas sets DOAS_USER, and neither
+# can be set by the caller through them; otherwise it is whoever runs this.
+invoker_uid="$EUID"
+if [[ -n "${SUDO_UID:-}" ]]; then
+    invoker_uid="$SUDO_UID"
+elif [[ -n "${DOAS_USER:-}" ]]; then
+    invoker_uid=$(id -u -- "$DOAS_USER" 2>/dev/null) || invoker_uid=""
+fi
+[[ "$invoker_uid" =~ ^[0-9]+$ ]] || { echo "docker-backup-tar-create: cannot tell the invoking user" >&2; exit 2; }
+[[ ! -L "$temp_dir" ]] || { echo "docker-backup-tar-create: temp_dir is a symlink: $temp_dir" >&2; exit 2; }
+# Check the directory we are IN, after `cd -P`, and archive it as `-C .`: a swap of the
+# /tmp entry after this point (the caller owns it) cannot redirect the archive.
+cd -P -- "$temp_dir" || { echo "docker-backup-tar-create: cannot enter temp_dir: $temp_dir" >&2; exit 2; }
+read -r td_uid td_mode < <(stat -c '%u %a' -- .) || { echo "docker-backup-tar-create: cannot stat temp_dir" >&2; exit 2; }
+[[ "$td_uid" == "$invoker_uid" ]] || { echo "docker-backup-tar-create: temp_dir is not owned by the invoking user (uid $invoker_uid): $temp_dir" >&2; exit 2; }
+(( (8#$td_mode & 8#077) == 0 )) || { echo "docker-backup-tar-create: temp_dir must be mode 0700: $temp_dir" >&2; exit 2; }
+
 # Appdata root must match the root-configured allowlist above (not arbitrary caller input)
 [[ "$appdata_path" == "$ALLOWED_APPDATA_PATH" ]] || { echo "docker-backup-tar-create: invalid appdata_path: $appdata_path (allowed: $ALLOWED_APPDATA_PATH)" >&2; exit 2; }
 
@@ -125,9 +145,34 @@ fi
 
 source_root="$appdata_path"
 if [[ -n "$snapshot_ts" ]]; then
+    # Root runs this file: it must be a regular file owned by root (whoever runs this),
+    # writable by nobody else (audit p5a F-04).
+    [[ -f "$SNAPSHOT_HELPER" && ! -L "$SNAPSHOT_HELPER" ]] \
+        || { echo "docker-backup-tar-create: SNAPSHOT_HELPER is not a regular file: $SNAPSHOT_HELPER" >&2; exit 1; }
+    read -r sh_uid sh_mode < <(stat -c '%u %a' -- "$SNAPSHOT_HELPER") \
+        || { echo "docker-backup-tar-create: cannot stat SNAPSHOT_HELPER" >&2; exit 1; }
+    [[ "$sh_uid" == "$EUID" ]] && (( (8#$sh_mode & 8#022) == 0 )) \
+        || { echo "docker-backup-tar-create: SNAPSHOT_HELPER must be owned by uid $EUID and not group/other-writable" >&2; exit 1; }
+    # The two helpers must agree on the appdata root, and the source must lie inside
+    # exactly this snapshot (its dir for btrfs, .zfs/snapshot/<name> for ZFS).
+    helper_info=$("$SNAPSHOT_HELPER" info) \
+        || { echo "docker-backup-tar-create: the snapshot helper's info failed" >&2; exit 1; }
+    sh_appdata="" snap_root=""
+    while IFS='=' read -r key val; do
+        case "$key" in
+            appdata)      sh_appdata="$val" ;;
+            snapshot_dir) snap_root="$val/dsb-$stack_name-$snapshot_ts" ;;
+            mountpoint)   snap_root="${val%/}/.zfs/snapshot/dsb-$stack_name-$snapshot_ts" ;;
+        esac
+    done <<< "$helper_info"
+    [[ "$sh_appdata" == "$ALLOWED_APPDATA_PATH" && -n "$snap_root" ]] \
+        || { echo "docker-backup-tar-create: the snapshot helper's appdata root is not ALLOWED_APPDATA_PATH" >&2; exit 1; }
     source_root=$("$SNAPSHOT_HELPER" source "$stack_name" "$snapshot_ts") \
         || { echo "docker-backup-tar-create: the snapshot helper could not resolve the snapshot" >&2; exit 1; }
-    [[ "$source_root" == /* && "$source_root" != *[[:cntrl:]]* && -d "$source_root/$stack_name" && ! -L "$source_root/$stack_name" ]] \
+    [[ "$source_root" == "$snap_root" || "$source_root" == "$snap_root"/* ]] \
+        || { echo "docker-backup-tar-create: snapshot source is outside the snapshot" >&2; exit 1; }
+    [[ "$source_root" != *[[:cntrl:]]* && "$source_root" != */../* && "$source_root" != */.. \
+        && -d "$source_root/$stack_name" && ! -L "$source_root/$stack_name" ]] \
         || { echo "docker-backup-tar-create: snapshot source is not a directory" >&2; exit 1; }
 fi
 
@@ -140,4 +185,5 @@ case "$compression" in
     zstd)  compression_flag=(--zstd) ;;
 esac
 
-exec /usr/bin/tar -c "${compression_flag[@]}" "${exclude_args[@]}" -C "$temp_dir" . -C "$source_root" "$stack_name"
+# `-C .` is the checked temp dir (the current directory); the source root is absolute.
+exec /usr/bin/tar -c "${compression_flag[@]}" "${exclude_args[@]}" -C . . -C "$source_root" "$stack_name"

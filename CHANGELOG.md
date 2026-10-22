@@ -58,8 +58,34 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   stack declares paths or snapshots are on, install the 0.7.0 tar helper too; the old
   one refuses the new arguments, and that stack's archive fails loudly.
 
+### Security
+
+- **The tar helper now refuses a `temp_dir` that is not the caller's own private
+  directory (High, present since 0.4.0).** It used to accept any existing `/tmp/<name>`
+  and `tar -C` into it as root. So a symlink there (or a root-owned directory already in
+  `/tmp`) let anyone holding the NOPASSWD grant read any directory as root. It now
+  requires a real directory (not a symlink), owned by the invoking user (`SUDO_UID` /
+  `DOAS_USER`), mode 0700, as `mktemp -d` makes it. It `cd -P`s into it, checks `.`, and
+  archives `-C .`, so a swap after the check cannot redirect it. **Reinstall the tar
+  helper on every host that grants it**, even if you use none of 0.7.0's other features.
+- The snapshot helper refuses to run when a mount sits between the subvolume it would
+  snapshot and the appdata root. A snapshot would show what is under that mount, not the
+  mounted data.
+- `create` repeats the boundary check after the stop. On btrfs it also looks inside the
+  new snapshot for the empty placeholder (inode 2) that a nested subvolume leaves, and
+  falls back if it finds one, so a subvolume made after `check` cannot be silently left
+  out.
+- The tar helper checks the snapshot helper before running it as root: a regular file,
+  not a symlink, root-owned, not group or other writable. It also checks that both
+  helpers agree on the appdata root, and that `source` points inside that exact
+  snapshot.
+
 ### Fixed
 
+- The default btrfs snapshot dir, when the appdata root is itself a subvolume, is now next
+  to it. Before, it was inside the appdata root and was refused for every verb.
+- An in-flight snapshot is deleted before an aborted run's status is written, so a failed
+  delete is counted in that run's record.
 - **#1186:** `LOCK_FILE` is no longer opened through a symlink or truncated on open. A
   symlink or non-regular file is refused. The file is opened without `O_TRUNC`. The
   opened fd's inode must match an `lstat` of the path (a swap in between is refused),

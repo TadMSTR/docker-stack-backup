@@ -90,16 +90,35 @@ teardown() {
     echo inside > "$APPDATA/web2/cache/f"
     run "$SNAP_HELPER" check web2
     [ "$output" = "fallback nested-subvolume" ]
-    # The trap it avoids: in a snapshot the nested subvolume is an empty directory.
-    "$SNAP_HELPER" create web2 "$TS"
-    local src; src=$("$SNAP_HELPER" source web2 "$TS")
-    [ -d "$src/web2/cache" ]
-    [ -z "$(ls -A "$src/web2/cache")" ]
-    "$SNAP_HELPER" delete web2 "$TS"
+    # The trap it avoids, shown with btrfs directly: in a snapshot the nested subvolume
+    # is an empty directory (inode 2).
+    btrfs subvolume snapshot -r "$VOL" "$SCR/raw-snap" >/dev/null
+    [ -d "$SCR/raw-snap/appdata/web2/cache" ]
+    [ -z "$(ls -A "$SCR/raw-snap/appdata/web2/cache")" ]
+    [ "$(stat -c %i "$SCR/raw-snap/appdata/web2/cache")" = 2 ]
+    # And the helper will not take one: create re-checks after the stop.
+    run "$SNAP_HELPER" create web2 "$TS"
+    [ "$status" -eq 3 ]
+    [ "$output" = "fallback nested-subvolume" ]
     # The stack dir itself being a subvolume counts too.
     btrfs subvolume create "$APPDATA/web3" >/dev/null
     run "$SNAP_HELPER" check web3
     [ "$output" = "fallback nested-subvolume" ]
+}
+
+@test "real btrfs: a nested subvolume made after check is caught in the snapshot itself (inode 2), and the snapshot removed" {
+    run "$SNAP_HELPER" check web
+    [ "$output" = ok ]
+    btrfs subvolume create "$APPDATA/web/late" >/dev/null
+    echo inside > "$APPDATA/web/late/f"
+    # Hide the late subvolume from create's own pre-snapshot scan, so the post-snapshot
+    # inode-2 scan is what has to catch it: a race we cannot time in a test.
+    sed -i 's/^        reason=$(boundary "$stack") || exit 1$/        reason=""/' "$SNAP_HELPER"
+    grep -c '^        reason=""$' "$SNAP_HELPER"
+    run "$SNAP_HELPER" create web "$TS"
+    [ "$status" -eq 3 ]
+    [ "$output" = "fallback nested-subvolume" ]
+    [ ! -e "$VOL/.dsb-snapshots/dsb-web-$TS" ]
 }
 
 @test "real btrfs: the snapshot-made archive equals the live one (listing and content hashes)" {

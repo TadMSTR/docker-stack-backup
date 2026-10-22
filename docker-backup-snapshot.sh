@@ -19,7 +19,8 @@
 #   check  <stack>          print "ok", or "fallback <reason>" if a snapshot would hide data
 #                           under the stack's appdata (nested subvolume, child dataset,
 #                           any mountpoint) or could not be read (snapdir=disabled)
-#   create <stack> <ts>     take the read-only snapshot dsb-<stack>-<ts>
+#   create <stack> <ts>     take the read-only snapshot dsb-<stack>-<ts>; exit 3 and print
+#                           "fallback <reason>" if a boundary appeared since `check`
 #   source <stack> <ts>     print the directory that holds <stack> inside that snapshot
 #   delete <stack> <ts>     delete exactly that snapshot
 #   sweep                   delete every leftover dsb-<stack>-<ts> snapshot, printing each
@@ -106,13 +107,33 @@ if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
         SUBVOL=$(dirname -- "$SUBVOL")
     done
     [[ "$(stat -f -c %T -- "$SUBVOL")" == btrfs ]] || refuse "$SUBVOL is not on btrfs"
+    # The walk goes by inode only, so it climbs past a mount whose root is not inode 256
+    # (a bind mount, or a subvol= mount of a plain directory). A snapshot of the subvolume
+    # above it shows the directory UNDER that mount, not the mounted data: stale data,
+    # archived as a success, or nothing (audit p5a F-02 / CR-01). So the mount holding the
+    # appdata root must be the subvolume itself or above it.
+    APPMNT=$(findmnt -n -o TARGET --target "$ALLOWED_APPDATA_PATH") || refuse "cannot find the mount of $ALLOWED_APPDATA_PATH"
+    if [[ "$APPMNT" != "$SUBVOL" && "$APPMNT" != / && "$SUBVOL" != "$APPMNT"/* ]]; then
+        refuse "$APPMNT is mounted between the subvolume $SUBVOL and ALLOWED_APPDATA_PATH: a snapshot of $SUBVOL would not show it"
+    fi
     REL=$(rel_below "$ALLOWED_APPDATA_PATH" "$SUBVOL")
     if [[ -z "$SNAPSHOT_DIR" ]]; then
-        if [[ "$SUBVOL" == / ]]; then SNAPSHOT_DIR="/.dsb-snapshots"; else SNAPSHOT_DIR="$SUBVOL/.dsb-snapshots"; fi
+        # Next to the subvolume when the appdata root IS the subvolume, since inside it
+        # would be under the appdata root (CR-02); else at the top of the subvolume.
+        parent=$(dirname -- "$SUBVOL")
+        if [[ "$SUBVOL" == "$ALLOWED_APPDATA_PATH" && "$parent" == / ]]; then
+            SNAPSHOT_DIR="/.dsb-snapshots"
+        elif [[ "$SUBVOL" == "$ALLOWED_APPDATA_PATH" ]]; then
+            SNAPSHOT_DIR="$parent/.dsb-snapshots"
+        elif [[ "$SUBVOL" == / ]]; then
+            SNAPSHOT_DIR="/.dsb-snapshots"
+        else
+            SNAPSHOT_DIR="$SUBVOL/.dsb-snapshots"
+        fi
     fi
     clean_abs "$SNAPSHOT_DIR" || refuse "SNAPSHOT_DIR must be a clean absolute path"
     if [[ "$SNAPSHOT_DIR" == "$ALLOWED_APPDATA_PATH" || "$SNAPSHOT_DIR" == "$ALLOWED_APPDATA_PATH"/* ]]; then
-        refuse "SNAPSHOT_DIR must not be under ALLOWED_APPDATA_PATH"
+        refuse "SNAPSHOT_DIR ($SNAPSHOT_DIR) must not be under ALLOWED_APPDATA_PATH; set SNAPSHOT_DIR in this helper"
     fi
 else
     DATASET=$(findmnt -n -o SOURCE --target "$ALLOWED_APPDATA_PATH") || refuse "cannot find the dataset of $ALLOWED_APPDATA_PATH"
@@ -151,6 +172,32 @@ btrfs_snapshot_ok() {
     [[ -d "$snap" && ! -L "$snap" && "$(stat -c %i -- "$snap")" == 256 ]]
 }
 
+# boundary <stack> — prints the reason a snapshot would hide data under the stack's
+# appdata (nested-dataset, mountpoint, nested-subvolume), or nothing. Exits 1 when it
+# cannot tell. Used by `check` before the stop and again by `create` after it.
+boundary() {
+    local dir="$ALLOWED_APPDATA_PATH/$1" mounts target fstype nested
+    [[ -d "$dir" && ! -L "$dir" ]] || fail "not a directory: $dir"
+    # Any mountpoint at or under the stack's appdata: a snapshot of the parent
+    # filesystem shows it as an empty directory. -r prints targets with special
+    # characters escaped; $dir itself has none, so a prefix test is exact.
+    mounts=$(findmnt -rn -o TARGET,FSTYPE) || fail "findmnt failed"
+    while read -r target fstype; do
+        if [[ "$target" == "$dir" || "$target" == "$dir"/* ]]; then
+            if [[ "$fstype" == zfs ]]; then echo nested-dataset; else echo mountpoint; fi
+            return 0
+        fi
+    done <<< "$mounts"
+    if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
+        # A nested subvolume (inode 256), the stack dir itself included. Any find error
+        # other than a file vanishing mid-walk is "cannot tell": fall back.
+        nested=$(find "$dir" -ignore_readdir_race -xdev -type d -inum 256 -print -quit) \
+            || fail "cannot walk $dir"
+        [[ -z "$nested" ]] || echo nested-subvolume
+    fi
+    return 0
+}
+
 #######################################
 # Verbs
 #######################################
@@ -180,28 +227,12 @@ case "$verb" in
         expect_args $# 1
         stack="$1"
         valid_stack "$stack" || refuse "invalid stack name"
-        dir="$ALLOWED_APPDATA_PATH/$stack"
-        [[ -d "$dir" && ! -L "$dir" ]] || fail "not a directory: $dir"
-        # Any mountpoint at or under the stack's appdata: a snapshot of the parent
-        # filesystem shows it as an empty directory. -r prints targets with special
-        # characters escaped; $dir itself has none, so a prefix test is exact.
-        mounts=$(findmnt -rn -o TARGET,FSTYPE) || fail "findmnt failed"
-        while read -r target fstype; do
-            if [[ "$target" == "$dir" || "$target" == "$dir"/* ]]; then
-                if [[ "$fstype" == zfs ]]; then echo "fallback nested-dataset"; else echo "fallback mountpoint"; fi
-                exit 0
-            fi
-        done <<< "$mounts"
-        if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
-            # A nested subvolume (inode 256), the stack dir itself included. Any find error
-            # other than a file vanishing mid-walk is "cannot tell": fall back.
-            nested=$(find "$dir" -ignore_readdir_race -xdev -type d -inum 256 -print -quit) \
-                || fail "cannot walk $dir"
-            if [[ -n "$nested" ]]; then
-                echo "fallback nested-subvolume"
-                exit 0
-            fi
-        else
+        reason=$(boundary "$stack") || exit 1
+        if [[ -n "$reason" ]]; then
+            echo "fallback $reason"
+            exit 0
+        fi
+        if [[ "$SNAPSHOT_BACKEND" != btrfs ]]; then
             snapdir=$(zfs get -H -o value snapdir "$DATASET") || fail "cannot read snapdir of the dataset"
             if [[ "$snapdir" == disabled ]]; then
                 echo "fallback snapdir-disabled"
@@ -221,10 +252,29 @@ case "$verb" in
         # for arbitrary names (each pins disk until the next sweep).
         [[ -d "$ALLOWED_APPDATA_PATH/$stack" && ! -L "$ALLOWED_APPDATA_PATH/$stack" ]] \
             || fail "no appdata dir for stack $stack"
+        # `check` ran before the stop; a mount or subvolume made since then would be hidden
+        # too (audit p5a F-03). Exit 3 + "fallback <reason>": the caller archives the old way.
+        reason=$(boundary "$stack") || exit 1
+        if [[ -n "$reason" ]]; then
+            echo "fallback $reason"
+            exit 3
+        fi
         if [[ "$SNAPSHOT_BACKEND" == btrfs ]]; then
             prepare_snapshot_dir
             [[ ! -e "$SNAPSHOT_DIR/$name" && ! -L "$SNAPSHOT_DIR/$name" ]] || fail "$name already exists"
             btrfs subvolume snapshot -r "$SUBVOL" "$SNAPSHOT_DIR/$name" >/dev/null || fail "btrfs snapshot failed"
+            # And what the snapshot itself holds, which no race can change: btrfs shows a
+            # nested subvolume inside a snapshot as an empty directory with inode 2.
+            inner="$SNAPSHOT_DIR/$name${REL:+/$REL}/$stack"
+            if ! hidden=$(find "$inner" -type d -inum 2 -print -quit); then
+                btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null || true
+                fail "cannot walk the snapshot of $stack"
+            fi
+            if [[ -n "$hidden" ]]; then
+                btrfs subvolume delete "$SNAPSHOT_DIR/$name" >/dev/null || fail "could not delete $name after finding a nested subvolume in it"
+                echo "fallback nested-subvolume"
+                exit 3
+            fi
         else
             zfs snapshot "$DATASET@$name" || fail "zfs snapshot failed"
         fi

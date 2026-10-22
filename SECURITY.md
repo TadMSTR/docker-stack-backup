@@ -81,7 +81,21 @@ snapshot-assisted backup. Its trust boundary:
 - `PATH` and `LC_ALL` are fixed inside the helper, because a root run with
   `ELEVATION_CMD=none` inherits the caller's environment.
 - The tar helper's `--from-snapshot` takes a timestamp, not a path, and gets the path
-  from this helper's `source` verb.
+  from this helper's `source` verb. Before calling it, the tar helper checks it is a
+  root-owned regular file that nobody else can write, that both helpers name the same
+  appdata root (`info`), and that the `source` path lies inside that exact snapshot.
+- `create` repeats the boundary check after the stack is stopped, and on btrfs also scans
+  the new snapshot for the empty inode-2 placeholder a nested subvolume leaves. So a
+  subvolume or mount made after `check` makes the stack fall back rather than be archived
+  with a hole in it.
+- The helper refuses to run if a mount lies between the snapshotted subvolume and the
+  appdata root (the snapshot would hold the directory under it).
+
+The tar helper's `temp_dir` (since 0.7.0): a real, non-symlink directory under `/tmp`,
+owned by the invoking user (`SUDO_UID` / `DOAS_USER`), mode 0700. It is checked after
+`cd -P` and archived as `-C .`. Before 0.7.0 any `/tmp/<name>` was accepted, so a symlink
+there, or a root-owned dir in `/tmp`, let the grant read any directory as root (audit
+2026-10-22, F-01).
 
 **Accepted:** whoever holds the sudo grant can `create` snapshots for any existing stack
 with any well-formed timestamp, each pinning disk until the next sweep (or their own

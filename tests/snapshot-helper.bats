@@ -408,7 +408,19 @@ tar_helper_setup() {
     tar_helper_setup "$liar"
     run bash "$TAR_HELPER" none "$TEMP_SRC" "$SNAP_APPDATA" st --from-snapshot "$TS"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"snapshot source is not a directory"* ]]
+    [[ "$output" == *"appdata root is not ALLOWED_APPDATA_PATH"* ]]
+    # A helper that agrees on appdata but points `source` outside the snapshot.
+    "$SNAP_HELPER" create st "$TS"
+    cat > "$liar" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == info ]]; then exec "$SNAP_HELPER" info; fi
+echo "$SNAP_APPDATA/.."
+STUB
+    tar_helper_setup "$liar"
+    run bash "$TAR_HELPER" none "$TEMP_SRC" "$SNAP_APPDATA" st --from-snapshot "$TS"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"snapshot source is outside the snapshot"* ]]
+    "$SNAP_HELPER" delete st "$TS"
     # The snapshot helper failing (no such snapshot) fails the archive too.
     tar_helper_setup "$SNAP_HELPER"
     run bash "$TAR_HELPER" none "$TEMP_SRC" "$SNAP_APPDATA" st --from-snapshot "$TS"
@@ -434,4 +446,56 @@ tar_helper_setup() {
     [ "$status" -eq 2 ]
     [ ! -e "$mark" ]
     rm -rf "${TEMP_SRC:?}"
+}
+
+@test "the tar helper refuses a snapshot helper that others can write (F-04)" {
+    snap_setup btrfs
+    tar_helper_setup
+    "$SNAP_HELPER" create st "$TS"
+    chmod 0775 "$SNAP_HELPER"
+    run bash "$TAR_HELPER" none "$TEMP_SRC" "$SNAP_APPDATA" st --from-snapshot "$TS"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not group/other-writable"* ]]
+    chmod 0755 "$SNAP_HELPER"
+    ln -s "$SNAP_HELPER" "$SNAP_T/linked-helper"
+    tar_helper_setup "$SNAP_T/linked-helper"
+    run bash "$TAR_HELPER" none "$TEMP_SRC" "$SNAP_APPDATA" st --from-snapshot "$TS"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"not a regular file"* ]]
+    rm -rf "${TEMP_SRC:?}"
+}
+
+@test "F-02: a mount between the subvolume and the appdata root makes the helper refuse to run" {
+    snap_setup btrfs
+    # findmnt --target says the appdata root is its own mount (a bind mount), below the
+    # subvolume the inode walk found.
+    export STUB_MNT="$SNAP_APPDATA"
+    run "$SNAP_HELPER" info
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"is mounted between the subvolume"* ]]
+    run "$SNAP_HELPER" create st "$TS"
+    [ "$status" -eq 2 ]
+    [ -z "$(snap_mutations)" ]
+}
+
+@test "CR-02: when the appdata root is itself the subvolume, the default snapshot dir sits next to it" {
+    snap_setup btrfs
+    printf '%s\n' "$SNAP_APPDATA" > "$SNAP_T/subvols"
+    export STUB_MNT="$SNAP_APPDATA"
+    run "$SNAP_HELPER" info
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"subvolume=$SNAP_APPDATA"* ]]
+    [[ "$output" == *"snapshot_dir=$SNAP_VOL/.dsb-snapshots"* ]]
+}
+
+@test "create re-checks the boundary after the stop: a mount that appeared since check -> exit 3, no snapshot (F-03)" {
+    snap_setup btrfs
+    run "$SNAP_HELPER" check st
+    [ "$output" = ok ]
+    mkdir -p "$SNAP_APPDATA/st/late"
+    echo "$SNAP_APPDATA/st/late ext4" > "$SNAP_T/mounts"
+    run "$SNAP_HELPER" create st "$TS"
+    [ "$status" -eq 3 ]
+    [ "$output" = "fallback mountpoint" ]
+    [ -z "$(snap_mutations)" ]
 }

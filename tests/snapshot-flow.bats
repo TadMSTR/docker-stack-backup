@@ -149,6 +149,26 @@ snapshots_left() {
     [[ "$output" == *"No snapshot for $STACK (mountpoint)"* ]]
 }
 
+@test "a mount that appears between check and create: fallback mountpoint, stopped once, no snapshot (F-03)" {
+    # The mount shows up on the first `compose stop`, i.e. after `check` ran.
+    mkdir -p "$APPDATA_PATH/$STACK/late"
+    local real_docker="$BIN_DIR/docker"
+    mv "$real_docker" "$BIN_DIR/docker.real"
+    cat > "$real_docker" <<STUB
+#!/usr/bin/env bash
+[[ "\$1 \$2" == "compose stop" ]] && echo "$APPDATA_PATH/$STACK/late ext4" > "$SNAP_T/mounts"
+exec "$BIN_DIR/docker.real" "\$@"
+STUB
+    chmod +x "$real_docker"
+    run_backup
+    [ "$status" -eq 0 ]
+    grep -q "check $STACK" "$DOCKER_LOG"
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
+    [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["fallback_reason"]')" = '"mountpoint"' ]
+    [ "$(js "$STATUS" 'd["stacks"][0]["result"]')" = '"backed_up"' ]
+}
+
 @test "the boundary check failing is 'cannot tell': fallback check-failed, never a snapshot" {
     # A stack dir that is a symlink makes `check` fail (exit 1).
     mv "$APPDATA_PATH/$STACK" "$APPDATA_PATH/real"
@@ -208,6 +228,15 @@ snapshots_left() {
     [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
     # The services were already running again: the snapshot flow started them first.
     [ "$(cat "$STATE_FILE")" = "$(printf 'app\nworker')" ]
+}
+
+@test "two signals and a delete that fails: the abort record counts it (CR-03)" {
+    export STUB_SIGNAL_ON_ARCHIVE="TERM TERM" STUB_SNAP_DELETE_RC=1
+    run_backup
+    [ "$status" -eq 143 ]
+    [ "$(js "$STATUS" 'd["abort_reason"]')" = '"interrupted"' ]
+    [ "$(js "$STATUS" 'd["snapshot_cleanup"]["failed"]')" = 1 ]
+    grep -qx "dsb_snapshot_cleanup_failures{host=\"$HOST\"} 1" "$PROM"
 }
 
 @test "one signal during the archive: the stack finishes (archive, delete), then the run stops" {

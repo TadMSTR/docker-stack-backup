@@ -202,6 +202,8 @@ delete_inflight_snapshot() {
 on_exit() {
     local rc=$?
     trap - EXIT
+    # Before the abort record is written, so a failed delete is counted in it (CR-03).
+    delete_inflight_snapshot || true
     if [[ "$STATUS_ARMED" == true && "$STATUS_DONE" != true ]]; then
         if lock_for_status 2>/dev/null; then
             write_run_status "${ABORT_REASON:-interrupted}" || true
@@ -216,7 +218,6 @@ on_exit() {
     if [[ -n "${STACK_TMP:-}" ]]; then
         rm -rf -- "$STACK_TMP" || true
     fi
-    delete_inflight_snapshot || true
     release_lock || true
     exit "$rc"
 }
@@ -764,13 +765,21 @@ backup_stack() {
     if [[ "$use_snapshot" == true ]]; then
         local snap_t0; snap_t0=$(date +%s)
         SNAPSHOT_INFLIGHT="$stack_name"
-        if snapshot_helper create "$stack_name" "$TIMESTAMP" 2>>"$LOG_FILE"; then
+        local create_out="" create_rc=0
+        create_out=$(snapshot_helper create "$stack_name" "$TIMESTAMP" 2>>"$LOG_FILE") || create_rc=$?
+        if [[ $create_rc -eq 0 ]]; then
             snap_s=$(( $(date +%s) - snap_t0 ))
             log "Snapshot taken: dsb-$stack_name-$TIMESTAMP (${snap_s}s)"
         else
-            log_warning "Snapshot of $stack_name failed (create-failed): archiving while it is stopped"
             use_snapshot=false
-            snap_fallback=create-failed
+            # Exit 3: a boundary appeared after the check (the helper has removed any
+            # snapshot it took). Anything else: the snapshot itself failed.
+            case "$create_rc:$create_out" in
+                "3:fallback nested-subvolume"|"3:fallback nested-dataset"|"3:fallback mountpoint")
+                    snap_fallback="${create_out#fallback }" ;;
+                *)  snap_fallback=create-failed ;;
+            esac
+            log_warning "Snapshot of $stack_name not used ($snap_fallback): archiving while it is stopped"
             # In case it was half made; quietly, as there is usually nothing to delete.
             snapshot_helper delete "$stack_name" "$TIMESTAMP" 2>/dev/null || true
             SNAPSHOT_INFLIGHT=""
