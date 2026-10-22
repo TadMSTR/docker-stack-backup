@@ -752,7 +752,8 @@ backup_stack() {
         if ! (cd "$stack_path" && docker compose stop); then
             log_error "Failed to stop stack $stack_name"
             STACK_FAIL_POINT="stop-failed"
-            snapshot_record_opts "$use_snapshot" "$snap_fallback" ""
+            # No snapshot was taken: the stop failed before it (CR-04).
+            snapshot_record_opts false "$snap_fallback" ""
             # A partial stop leaves some services down; bring back what was running.
             restart_stack_with_retry "$stack_path" "$running_containers" || true
             return 1

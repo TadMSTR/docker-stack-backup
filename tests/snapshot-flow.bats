@@ -284,6 +284,16 @@ STUB
     [ "$(snapshots_left)" -eq 0 ]
 }
 
+@test "the stop fails: no snapshot is taken, and none is reported as used (CR-04)" {
+    export STUB_STOP_RC=1
+    run_backup
+    [ "$status" -eq 1 ]
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    [ "$(js "$STATUS" 'd["stacks"][0]["reason"]')" = '"stop-failed"' ]
+    [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["used"]')" = false ]
+    grep -qx "dsb_stack_snapshot_used{host=\"$HOST\",stack=\"$STACK\"} 0" "$PROM"
+}
+
 @test "a stopped stack is archived live: no check, no snapshot" {
     : > "$STATE_FILE"
     run_backup
