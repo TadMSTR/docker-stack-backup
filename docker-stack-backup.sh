@@ -814,12 +814,14 @@ backup_stack() {
     # Written to <stack>.incomplete and renamed on success — see create_archive_atomic.
     # From the snapshot, the member names are the same <stack>/… as from the live dir.
     local archived=false
+    # shellcheck disable=SC2034  # ARCHIVE_SNAPSHOT_TS is read by create_compressed_archive (lib.sh)
     [[ "$use_snapshot" == true ]] && ARCHIVE_SNAPSHOT_TS="$TIMESTAMP"
     if create_archive_atomic "$backup_file" \
         -C "$temp_dir" . \
         -C "$APPDATA_PATH" "$stack_name" 2>&1 | tee -a "$LOG_FILE"; then
         archived=true
     fi
+    # shellcheck disable=SC2034  # read by create_compressed_archive (lib.sh)
     ARCHIVE_SNAPSHOT_TS=""
     DECLARED_EXCLUDES=()
     if [[ "$use_snapshot" == true ]]; then
@@ -903,6 +905,7 @@ main() {
                 shift
                 ;;
             --full)
+                # shellcheck disable=SC2034  # read by resolve_run_kind (lib.sh)
                 FORCE_FULL_RUN=true
                 shift
                 ;;
