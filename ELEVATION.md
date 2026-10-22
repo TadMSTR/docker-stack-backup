@@ -196,9 +196,9 @@ If the snapshot helper is not at `/usr/local/sbin/docker-backup-snapshot.sh`, al
 
 `SNAPSHOT_DIR` must be on the same btrfs filesystem and must not be under the appdata
 root. The helper creates it 0700, and refuses one that is a symlink, is not owned by
-root, or is group- or world-writable. On forge (`/opt` = subvolume `@opt`,
-`/opt/appdata` a plain directory in it) the default is `/opt/.dsb-snapshots`, and each
-snapshot is of `@opt`.
+root, or is group- or world-writable. Example: with `/opt` a subvolume and
+`/opt/appdata` a plain directory in it, the default is `/opt/.dsb-snapshots`, and each
+snapshot is of the `/opt` subvolume.
 
 sudoers, both helpers (`/etc/sudoers.d/docker-backup`, mode `0440`, `visudo -c`):
 
