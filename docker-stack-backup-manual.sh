@@ -591,6 +591,10 @@ backup_stack() {
     rm -f -- "$xb_file"
     if [[ ${#DECLARED_EXCLUDES[@]} -gt 0 ]]; then
         echo "  └─ x-backup: leaving out $(join_by ', ' "${DECLARED_EXCLUDES[@]}")"
+        # The manual script writes no status.json; the log is its record of what an
+        # archive leaves out (audit p5a F-05).
+        printf '%s x-backup (manual, full): %s left out %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" \
+            "$(printable "$stack_name")" "$(join_by ', ' "${DECLARED_EXCLUDES[@]}")" >> "$LOG_FILE"
     fi
 
     mkdir -p "$backup_dir"

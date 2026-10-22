@@ -91,14 +91,22 @@ just `<stack>`.
 
 **Accepted:** anyone who can edit a stack's compose file can declare `x-backup.exclude`
 paths and so leave a subtree of that stack's appdata out of the backup. A declaration
-can only narrow the stack's own backup, every one needs a reason, and each one is
-visible in status.json (`x_backup.excluded`) and the .prom (`dsb_stack_xbackup_paths`).
-The compose files are as trusted as the stack's own configuration.
+can only narrow the stack's own backup, and every one needs a reason. For the nightly
+run, each one is visible in status.json (`x_backup.excluded`) and the .prom
+(`dsb_stack_xbackup_paths`). The manual script writes no status.json: it prints the
+excluded paths and writes them to its `LOG_FILE`. The compose files are as trusted as the
+stack's own configuration.
 
 **Accepted:** the snapshot is of the whole subvolume or dataset that holds the appdata
-root (on forge, `@opt`), not of one stack's directory. It is read-only, lives in a
-root-only directory, and is deleted after the stack's archive. While it exists, it
-holds root-readable copies of everything in that subvolume, which root can read anyway.
+root, not of one stack's directory. It is read-only and is deleted after the stack's
+archive (or by the next run's sweep).
+- **btrfs:** it lives in the 0700 root-only `SNAPSHOT_DIR`. While it exists, it holds
+  copies of everything in that subvolume, which only root can reach.
+- **ZFS:** it is reachable at `<mountpoint>/.zfs/snapshot/<name>` (with `snapdir=hidden`
+  too) by any local user, subject to the file modes **as they were when it was taken**.
+  For as long as it exists, a file deleted or tightened since then is still readable
+  there at its old mode. The window is the archive's duration, longer only if a delete
+  fails. The TrueNAS target is a single-admin, root-run host.
 
 `tests/snapshot-helper.bats` runs each negative probe first against a naive helper, to
 show the probe fires, and then against the real helper, which must refuse it without
