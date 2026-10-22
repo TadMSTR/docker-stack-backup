@@ -192,8 +192,10 @@ fi
 # setpriv, and written into a private root-owned staging dir that tar then archives. So
 # whatever the caller does to its own dir (swap it, rename another dir to it, plant a
 # link to a file it cannot read), root only ever archives bytes the caller could read
-# anyway (audit p5a R3-01, option B). Ownership and modes of the staged files are set
-# back to the caller's, so the archive's root members look as they did before.
+# anyway (audit p5a R3-01, option B). The staged files get the caller's owner and modes
+# back; the stage dir itself stays root's (it is the archive's `./` member). It must NEVER
+# be handed to the caller: /tmp is sticky, so the owner of an entry can rename it, and
+# swap in a symlink that `tar -C` would then follow as root (audit p5a R4-01).
 #######################################
 STAGE_NAMES=(compose.yaml compose.yml docker-compose.yaml docker-compose.yml .env)
 STAGE_MAX_BYTES=$((16 * 1024 * 1024))
@@ -208,12 +210,22 @@ as_invoker() {
         "$@"
     fi
 }
+# A drop that does not work must fail the archive, not make every file look absent and
+# archive the stack without its compose file and .env (audit p5a R4-02).
+if [[ "$drop_privs" == true ]]; then
+    as_invoker true || { echo "docker-backup-tar-create: cannot run as the invoking user (setpriv)" >&2; exit 1; }
+fi
 umask 077
 stage=$(mktemp -d /tmp/dsb-stage.XXXXXXXXXX) || { echo "docker-backup-tar-create: cannot create a staging dir" >&2; exit 1; }
 trap 'rm -rf -- "$stage"' EXIT
+staged_compose=false
 for name in "${STAGE_NAMES[@]}"; do
-    # Relative to the checked cwd. `stat` without -L: a symlink is reported as one.
-    info=$(as_invoker stat -c '%F|%a' -- "./$name" 2>/dev/null) || continue   # absent
+    # Relative to the checked cwd. Only "not there" (no entry, not even a dangling
+    # symlink) skips a name; any other failure to look at it fails the archive.
+    as_invoker test -e "./$name" -o -L "./$name" || continue
+    # `stat` without -L: a symlink is reported as one.
+    info=$(as_invoker stat -c '%F|%a' -- "./$name") \
+        || { echo "docker-backup-tar-create: cannot stat $name as the invoking user" >&2; exit 1; }
     kind="${info%%|*}" mode="${info##*|}"
     [[ "$kind" == "regular file" || "$kind" == "regular empty file" ]] \
         || { echo "docker-backup-tar-create: $name in temp_dir is not a regular file" >&2; exit 2; }
@@ -225,9 +237,14 @@ for name in "${STAGE_NAMES[@]}"; do
     chmod "$mode" -- "$stage/$name"
     chown "$invoker_uid:$invoker_gid" -- "$stage/$name" 2>/dev/null || [[ $EUID -ne 0 ]] \
         || { echo "docker-backup-tar-create: cannot set the owner of the staged $name" >&2; exit 1; }
+    [[ "$name" == .env ]] || staged_compose=true
 done
-chmod 0700 -- "$stage"
-chown "$invoker_uid:$invoker_gid" -- "$stage" 2>/dev/null || true
+# The backup always puts the stack's compose file in the temp dir; without it the
+# archive could not be restored.
+[[ "$staged_compose" == true ]] || { echo "docker-backup-tar-create: no compose file in temp_dir" >&2; exit 2; }
+# Defensive, right before tar resolves it: still a real dir, still ours (R4-01).
+[[ -d "$stage" && ! -L "$stage" && "$(stat -c %u -- "$stage")" == "$EUID" ]] \
+    || { echo "docker-backup-tar-create: the staging dir was tampered with" >&2; exit 1; }
 
 compression_flag=()
 case "$compression" in

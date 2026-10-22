@@ -97,9 +97,14 @@ The tar helper's `temp_dir` (since 0.7.0). **Root never reads the caller's temp 
 The only files the backup puts there (the stack's compose file, by one of its four
 names, and `.env`) are read **as the invoking user** (`setpriv --reuid/--regid
 --clear-groups --no-new-privs`, from `SUDO_UID`/`SUDO_GID` or `DOAS_USER`). Each must be
-a regular file of at most 16 MiB. They are copied into a private root-owned staging dir,
-which is what tar archives (owners and modes set back to the caller's). Anything else in
-the temp dir is ignored. So whatever the caller does to its own `/tmp/<name>` (swap it
+a regular file of at most 16 MiB. They are copied into a private staging dir that stays
+root-owned and 0700 for the whole archive, and that is what tar archives. The staged
+files get the caller's owners and modes back; the stage dir, the archive's `./`
+member, is root's. It is never given to the caller: in sticky `/tmp` the owner of an
+entry can rename it, which would let it swap a symlink in under `tar -C` (audit
+2026-10-22, R4-01). Anything else in the temp dir is ignored. If the drop to the caller
+cannot be made, or an allowlisted name cannot be examined, the archive fails, and a temp
+dir with no compose file is refused (R4-02). So whatever the caller does to its own `/tmp/<name>` (swap it
 for a symlink, rename another of its directories there, plant a link to a file it cannot
 read), root archives only bytes the caller could read itself.
 

@@ -68,8 +68,10 @@ docker-stack-backup-2026-10 part 5a (vikunja#1086), from #494 Part 1.
   `DOAS_USER`), mode 0700, as `mktemp -d` makes it, and after `cd -P` the kernel's cwd
   must be that directory. **Root no longer reads the temp dir at all.** The compose file
   and `.env` are read as the invoking user (`setpriv`) into a private staging dir, and
-  that is what is archived. So no swap, rename or link in the caller's own dir can make
-  root archive anything the caller could not read itself. **Reinstall the tar helper on
+  that is what is archived; that dir stays root's and is never handed to the caller. So
+  no swap, rename or link in the caller's own dir can make root archive anything the
+  caller could not read itself. A drop that fails, or a temp dir with no compose file,
+  fails the archive. The archive's root `./` member is now root-owned. **Reinstall the tar helper on
   every host that grants it**, even if you use none of 0.7.0's other features.
 - The snapshot helper refuses to run when a mount sits between the subvolume it would
   snapshot and the appdata root. A snapshot would show what is under that mount, not the

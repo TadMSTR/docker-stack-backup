@@ -14,6 +14,7 @@ setup() {
     APPDATA="$TEST_DIR/appdata"
     mkdir -p "$APPDATA/st"
     TEMP_SRC="$(mktemp -d -p /tmp)"
+    echo "services: {}" > "$TEMP_SRC/compose.yaml"
     HELPER="$TEST_DIR/helper.sh"
     sed "s|^ALLOWED_APPDATA_PATH=.*|ALLOWED_APPDATA_PATH=\"$APPDATA\"|" \
         "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh" > "$HELPER"

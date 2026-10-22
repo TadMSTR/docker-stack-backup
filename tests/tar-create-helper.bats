@@ -186,6 +186,7 @@ old_helper() {
     # a symlink. Only the cwd-vs-lstat inode check stands between it and the target.
     local secret="$TEST_DIR/secret"
     mkdir -m 0700 "$secret" && echo topsecret > "$secret/shadow-like"
+    echo "services: {}" > "$secret/compose.yaml"
     local link="/tmp/dsb-r201-probe-$$"
     PROBE_LINK="$link"
     ln -s "$secret" "$link"
@@ -257,10 +258,12 @@ STUB
     echo "A=1" > "$TEMP_SRC/.env"
     SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" bash "$TEST_DIR/helper-drop.sh" none "$TEMP_SRC" "$APPDATA" mystack > "$TEST_DIR/out.tar"
     run cat "$TEST_DIR/setpriv.log"
-    # A stat for each of the 5 allowlisted names, a read (head) for the 2 present; all
-    # with the caller's ids, none as root.
-    [ "${#lines[@]}" -eq 7 ]
-    [ "$(grep -c ':: stat$' "$TEST_DIR/setpriv.log")" -eq 5 ]
+    # One `true` (the drop works), a `test` for each of the 5 allowlisted names, a stat
+    # and a read (head) for the 2 present; all with the caller's ids, none as root.
+    [ "${#lines[@]}" -eq 10 ]
+    [ "$(grep -c ':: true$' "$TEST_DIR/setpriv.log")" -eq 1 ]
+    [ "$(grep -c ':: test$' "$TEST_DIR/setpriv.log")" -eq 5 ]
+    [ "$(grep -c ':: stat$' "$TEST_DIR/setpriv.log")" -eq 2 ]
     [ "$(grep -c ':: head$' "$TEST_DIR/setpriv.log")" -eq 2 ]
     local l
     for l in "${lines[@]}"; do
@@ -268,4 +271,65 @@ STUB
     done
     [[ "$output" == *":: stat"* && "$output" == *":: head"* ]]
     [ "$(tar -xOf "$TEST_DIR/out.tar" ./.env)" = "A=1" ]
+}
+
+# A copy of the helper forced onto the privilege-drop path, with $1 as its setpriv shim.
+drop_helper() {
+    local shim="$TEST_DIR/shim"; mkdir -p "$shim"
+    printf '%s\n' "$1" > "$shim/setpriv"; chmod +x "$shim/setpriv"
+    sed -e 's/^drop_privs=false$/drop_privs=true/' \
+        -e "s|^PATH=.*|PATH=\"$shim:/usr/sbin:/usr/bin:/sbin:/bin\"|" "$HELPER" > "$TEST_DIR/helper-drop.sh"
+}
+
+@test "R4-02: a setpriv that cannot drop fails the archive (it does not drop compose/.env)" {
+    echo "A=1" > "$TEMP_SRC/.env"
+    drop_helper '#!/usr/bin/env bash
+exit 1'
+    SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" run bash "$TEST_DIR/helper-drop.sh" none "$TEMP_SRC" "$APPDATA" mystack
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot run as the invoking user (setpriv)"* ]]
+}
+
+@test "R4-02: a name that is there but cannot be examined fails the archive, it is not 'absent'" {
+    echo "A=1" > "$TEMP_SRC/.env"
+    drop_helper '#!/usr/bin/env bash
+while [[ $# -gt 0 && "$1" != -- ]]; do shift; done; shift
+[[ "$1" == stat ]] && exit 1
+exec "$@"'
+    SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" run bash "$TEST_DIR/helper-drop.sh" none "$TEMP_SRC" "$APPDATA" mystack
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"cannot stat"*"as the invoking user"* ]]
+}
+
+@test "R4-02: a temp_dir with no compose file is refused (the archive could not be restored)" {
+    rm "$TEMP_SRC/compose.yaml"
+    echo "A=1" > "$TEMP_SRC/.env"
+    run bash "$HELPER" none "$TEMP_SRC" "$APPDATA" mystack
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"no compose file in temp_dir"* ]]
+}
+
+@test "R4-01: the stage dir is never handed to the caller, and a swapped stage is refused before tar" {
+    # Static: nothing chowns the stage dir itself (only the files in it).
+    ! grep -nE 'chown [^#]*-- "\$stage"( |$)' "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh"
+    # Dynamic (unprivileged, so we own the stage anyway): the last read swaps the stage for
+    # a symlink, as a caller owning it could; the check right before tar refuses it.
+    # The decoy holds a compose.yaml too, so the rest of the staging loop runs through the
+    # swapped path and it is the final check (right before tar) that has to catch it.
+    local decoy="$TEST_DIR/decoy"; mkdir -m 0700 "$decoy"; echo SECRETMARK > "$decoy/s"
+    echo "services: {}" > "$decoy/compose.yaml"
+    drop_helper "#!/usr/bin/env bash
+while [[ \$# -gt 0 && \"\$1\" != -- ]]; do shift; done; shift
+if [[ \"\$1\" == head && \"\${!#}\" == ./compose.yaml ]]; then
+    st=\$(ls -dt /tmp/dsb-stage.* | head -1)
+    \"\$@\" > \"\$st.real-out\"; rc=\$?
+    mv \"\$st\" \"\$st.moved\" && ln -s '$decoy' \"\$st\"
+    cat \"\$st.real-out\"; rm -f \"\$st.real-out\"; exit \$rc
+fi
+exec \"\$@\""
+    SUDO_UID="$(id -u)" SUDO_GID="$(id -g)" run bash "$TEST_DIR/helper-drop.sh" none "$TEMP_SRC" "$APPDATA" mystack
+    local st; for st in /tmp/dsb-stage.*.moved; do [[ -O "$st" ]] && rm -rf -- "$st" "${st%.moved}"; done
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"the staging dir was tampered with"* ]]
+    [[ "$output" != *SECRETMARK* ]]
 }
