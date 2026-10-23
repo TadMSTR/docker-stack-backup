@@ -20,4 +20,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: bats-core/bats-action@3.0.0
+      # restic for the restic helper tests: a pinned release, checked against its published
+      # SHA256 (tests/helpers/restic.bash finds it through DSB_TEST_RESTIC). Tests that need
+      # user namespaces skip on GitHub runners.
+      - name: restic 0.18.0 (pinned, sha256-checked)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/restic.bz2" \
+            https://github.com/restic/restic/releases/download/v0.18.0/restic_0.18.0_linux_amd64.bz2
+          echo "98f6dd8bf5b59058d04bfd8dab58e196cc2a680666ccee90275a3b722374438e  $RUNNER_TEMP/restic.bz2" | sha256sum -c -
+          bunzip2 "$RUNNER_TEMP/restic.bz2"
+          chmod 0755 "$RUNNER_TEMP/restic"
+          echo "DSB_TEST_RESTIC=$RUNNER_TEMP/restic" >> "$GITHUB_ENV"
       - run: bats tests/

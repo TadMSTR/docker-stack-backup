@@ -358,6 +358,17 @@ STUB
     run_backup
     [ "$status" -eq 1 ]
     [[ "$output" == *"RESTIC_CHECK_SUBSET must be"* ]]
+    # A global exclude pattern the helpers would refuse (here: one string with a space).
+    export RESTIC_CHECK_SUBSET=auto EXCLUDE_PATTERNS="a b"
+    run_backup
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is not allowed with restic"* ]]
+    # With tar only the new check does not apply: the pattern behaves as on 0.7.0 (the
+    # elevated tar helper refuses it per stack, as before).
+    export BACKENDS=tar
+    run_backup
+    [[ "$output" != *"is not allowed with restic"* ]]
+    [[ "$output" != *"invalid-config"* ]]
 }
 
 @test "dry run shows the backends and does not call restic backup" {
@@ -378,4 +389,10 @@ STUB
     [ "$(stat -c %a "$HOST_DIR")" = 700 ]
     # status.json stays world-readable (names and sizes only).
     [ "$(stat -c %a "$STATUS")" = 644 ]
+    # The compose file keeps its own mode in the archive (cp -p), not one masked by 077.
+    chmod 0644 "$DOCKHAND_BASE/$STACK/docker-compose.yml"
+    rm -rf "${HOST_DIR:?}"/2*
+    run_backup
+    archive=$(find "$HOST_DIR" -name "$STACK.tar")
+    tar -tvf "$archive" | grep -q '^-rw-r--r-- .* \./docker-compose.yml$'
 }

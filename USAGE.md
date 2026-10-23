@@ -9,6 +9,7 @@ Detailed instructions for configuring and using the Docker Stack Backup & Restor
 3. [Running Backups](#running-backups)
    - [Backup tiers (`x-backup`)](#backup-tiers-x-backup)
    - [Snapshots](#snapshots)
+   - [Backends: tar and restic](#backends-tar-and-restic)
 4. [Restoring from Backup](#restoring-from-backup)
 5. [Verification & Maintenance](#verification--maintenance)
 6. [Automation](#automation)
@@ -192,6 +193,12 @@ These values are a contract from 0.6.0 on: alerts and dashboards match on them.
 | failed | `archive-failed` | the archive could not be written (what was running is started again) |
 | failed | `restart-failed` | archived, but the stack did not come back up (CRITICAL notification) |
 | failed | `interrupted` | a second INT/TERM arrived while this stack was being backed up; its services may be stopped |
+| failed | `restic-backup-failed` | the stack's restic backup failed (0.8.0; restic exit 3 = some files could not be read) |
+| failed | `restic-repo-locked` | the restic repository was locked during the stack's backup (0.8.0) |
+| failed | `restic-repo-missing`, `restic-password-wrong`, `restic-repo-error`, `restic-helper-refused`, `restic-helper-failed` | restic could not be used at all this run (0.8.0); every stack's restic backup fails with the same reason, which is also `restic.problem` |
+
+With more than one backend, a stack is `backed_up` only if every backend scheduled for it
+this run succeeded; `stacks[].backends` in status.json has each backend's own result.
 
 `no-compose-file` exists in the code but is never recorded: a dir without a compose file
 is not counted as a stack. The log and notification text keep their 0.5.x wording, so the
@@ -362,6 +369,32 @@ Other behaviour:
 The manual script does not use snapshots: it is run by hand, for a few stacks, and keeps
 the plain stop-archive-start.
 
+### Backends: tar and restic
+
+*0.8.0.* `BACKENDS` selects what each stack is written to: `tar` (the default: an archive
+per stack in a run dir), `restic` (one snapshot per stack in a restic repository), or
+`"tar restic"`. RESTIC.md has the restic side: install, retention, prune and check,
+security.
+
+- **One stop per stack, whatever the number of backends.** Both read the same source: the
+  snapshot (after the stack is started again) or, for a stopped stack or a snapshot
+  fallback, the live dir while the stack is still stopped.
+- **The same excludes.** `x-backup` paths and `EXCLUDE_PATTERNS` leave out exactly the same
+  files from both (`tests/restic-e2e.bats`).
+- **`TAR_SCHEDULE`**: `daily` (every run, the default) or `full`, which writes the tar set
+  only on the full run (`FULL_RUN_DAY`, or `--full`): a weekly tar beside daily restic.
+  `full` needs both backends, or daily runs would back up nothing.
+- **Weekly tar retention.** `cleanup-old-backups.sh` needs no change, but its settings
+  do: `RETENTION_DAYS=27 KEEP_MIN=4` keeps exactly the four newest weekly sets on every
+  night of the week. `RETENTION_DAYS=29` keeps five on the full-run day, because the set
+  from 28 days ago is not "more than 29 days" old (`tests/cleanup-weekly.bats`).
+- The dry run prints the backends and, per stack, which ones would run.
+- The manual script writes tar only.
+
+Archives are written **0600** in **0700** run dirs (#1089). Restore and verify read the
+share as its owner, which also works when root is squashed on an NFS export (RESTIC.md
+"Upgrading to 0.8.0" has the one-time `chmod` of older archives).
+
 ---
 
 ## Restoring from Backup
@@ -374,6 +407,13 @@ sudo docker-stack-restore.sh
 ```
 
 **Wizard flow:**
+
+**Step 0: Select Backup Source** (0.8.0, only when `RESTIC_HELPER_PATH` is set): `1)` tar
+archives on the share, or `2)` restic snapshots of this host. For restic, Step 2 lists the
+stacks with snapshots and Step 3 the stack's snapshots, newest first, with the run kind.
+Steps 4-6 are the same for both sources: the wizard reads one tar stream, from the archive
+or from the restic helper's `dump`, which has the archive's member layout (RESTIC.md
+"Restore").
 
 **Step 1: Select Host**
 ```
@@ -482,6 +522,9 @@ find /mnt/backup/docker-backups -type d -mtime +30
 
 # Adjust retention in the script
 # Edit RETENTION_DAYS in cleanup-old-backups.sh
+
+# Weekly tar sets (TAR_SCHEDULE=full): exactly the 4 newest
+RETENTION_DAYS=27 KEEP_MIN=4 cleanup-old-backups.sh
 ```
 
 ---

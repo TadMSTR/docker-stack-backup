@@ -14,6 +14,7 @@ A comprehensive backup and restore solution for Docker Compose stacks managed by
 - 📊 **Detailed Logging** - Comprehensive audit trail
 - 🔍 **Backup Verification** - Tools to verify backup integrity
 - 🧹 **Automatic Cleanup** - Configurable retention policies
+- 🗄️ **restic backend** - Daily deduplicated snapshots per stack beside (or instead of) tar, per-stack retention, restore through the same wizard ([RESTIC.md](RESTIC.md))
 
 ## Overview
 
@@ -91,6 +92,7 @@ sudo docker-stack-backup-manual.sh
 - **[Post-Restart Hooks](HOOKS.md)** - Run custom fixups after each stack's containers restart
 - **[Compression Configuration](COMPRESSION.md)** - Compression methods, levels, and parallel processing
 - **[Dry-Run Mode](DRY_RUN.md)** - Simulate backups without making changes
+- **[restic Backend](RESTIC.md)** - The restic backend: install, retention, prune and check, restore, security
 - **[Run Status & Coverage](STATUS.md)** - `status.json`, the Prometheus textfile, the coverage classifier and its exemptions, the liveness ping
 - **[Safety Features & Error Handling](SAFETY_FEATURES.md)** - Built-in checks that prevent common failure scenarios
 - **[OS Compatibility](OS_COMPATIBILITY.md)** - Supported Linux distributions and detection

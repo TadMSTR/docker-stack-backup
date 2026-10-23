@@ -252,6 +252,59 @@ x-backup declared paths (after `--`). With neither in use, the script passes it 
 `x-backup` path or snapshots are turned on. After that, the old helper refuses the new
 arguments and the stack's archive fails: loud, not silent.
 
+## The restic helper
+
+*0.8.0.* `BACKENDS=restic` (RESTIC.md) needs a third root helper,
+`docker-backup-restic.sh`. A loose `sudo restic` grant is a root primitive (back up
+`/etc/shadow`, restore over `/`, forget every host's history, use a repository and
+password of the caller's choosing), so this helper too **takes no path, repository,
+password or restic flag from its caller**. Its constants decide them, and restic itself
+never runs as root: every call drops to the dedicated `RESTIC_RUN_AS` user with
+`CAP_DAC_READ_SEARCH` only, and gets the password on stdin.
+
+| Verb | Does |
+|---|---|
+| `info` | prints the helper's settings and retention floors (no restic call) |
+| `repo` | prints the repository id; restic's exit code on failure (10 missing, 12 wrong password) |
+| `init` | initialises the repository once |
+| `backup <temp_dir> <stack> <ts> <kind> [--from-snapshot] [glob...] [-- <stack>/<path>...]` | one restic snapshot of the stack, from the same source and with the same excludes as the tar helper |
+| `forget <stack> <d> <w> <m>` | that stack's retention on this host; counts below the floors refused |
+| `prune`, `check <n/N or x%>`, `stats` | repository maintenance and size |
+| `snapshots [<stack>]` | this host's snapshots, JSON |
+| `dump <stack> <id>` | one of that stack's snapshots as a tar stream, for the restore wizard |
+
+Install it next to the other two (RESTIC.md "Install" has the constants and the one-time
+user, repository and password setup):
+
+```bash
+sudo cp docker-backup-restic.sh /usr/local/sbin/docker-backup-restic.sh
+sudo chown root:root /usr/local/sbin/docker-backup-restic.sh
+sudo chmod 0750 /usr/local/sbin/docker-backup-restic.sh
+sudoedit /usr/local/sbin/docker-backup-restic.sh
+```
+
+sudoers, all three helpers (`/etc/sudoers.d/docker-backup`, mode `0440`, `visudo -c`):
+
+```
+backupuser ALL=(root) NOPASSWD: /usr/local/sbin/docker-backup-tar-create.sh, /usr/local/sbin/docker-backup-snapshot.sh, /usr/local/sbin/docker-backup-restic.sh
+```
+
+doas:
+
+```
+permit nopass backupuser as root cmd /usr/local/sbin/docker-backup-restic.sh
+```
+
+config.sh:
+
+```bash
+BACKENDS="tar restic"
+RESTIC_HELPER_PATH="/usr/local/sbin/docker-backup-restic.sh"
+```
+
+As with the snapshot helper, a root run (`ELEVATION_CMD=none`) calls it directly. The
+restore wizard, which runs as root, always does.
+
 ## A note on `root_squash` and the stdout redirect
 
 Every `tar` invocation in `lib.sh` (elevated or not) writes the archive to stdout, and

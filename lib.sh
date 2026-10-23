@@ -422,7 +422,9 @@ restic_check_subset() {
 # ELEVATION_CMD, or directly when already root (ELEVATION_CMD=none). As snapshot_helper.
 restic_helper() {
     case "${ELEVATION_CMD:-none}" in
-        none)      "$RESTIC_HELPER_PATH" "$@" ;;
+        # Already root: the helper must see root as its invoker, not a SUDO_UID left in
+        # the environment by `sudo -i` or a wrapper (it would refuse root's temp dir).
+        none)      env -u SUDO_UID -u SUDO_GID -u SUDO_USER -u DOAS_USER "$RESTIC_HELPER_PATH" "$@" ;;
         sudo|doas) "$ELEVATION_CMD" "$RESTIC_HELPER_PATH" "$@" ;;
         *) log_error "Unsupported ELEVATION_CMD: '$(printable "${ELEVATION_CMD:-}")' (expected: none | sudo | doas)"; return 2 ;;
     esac

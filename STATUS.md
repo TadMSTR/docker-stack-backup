@@ -57,7 +57,7 @@ removes or changes the meaning of a field bumps it.
 {
  "schema": 1,
  "tool": "docker-stack-backup",
- "version": "0.7.0",
+ "version": "0.8.0",
  "host": "forge",
  "run_id": "20261019_020001",
  "started": 1760839201,
@@ -69,6 +69,19 @@ removes or changes the meaning of a field bumps it.
  "platform": "debian",
  "snapshot_backend": "btrfs",
  "snapshot_note": null,
+ "backends": ["tar", "restic"],
+ "tar_schedule": "full",
+ "tar_ran": false,
+ "backend_last_success": {"tar": 1760234401, "restic": 1760839987},
+ "restic": {"ran": true, "repo_id": "6b0c…64 hex…", "problem": null,
+            "forget": {"result": "ok", "last_success": 1760839987, "stacks": 31, "failed": 0},
+            "prune": {"result": null, "last_success": 1760234401},
+            "check": {"result": null, "last_success": 1760234401, "subset": null},
+            "orphan_stacks": [], "snapshots": 412,
+            "stats": {"total_size": 190000000000, "total_uncompressed_size": 260000000000,
+                      "snapshots_count": 412, "total_blob_count": 1800000}},
+ "restore_verified": {"tar": {"time": 1760200000, "version": "0.8.0", "ref": "drill: dsb-drill.tar"},
+                      "restic": {"time": 1760200100, "version": "0.8.0", "ref": "drill snapshot 1eccf1bd"}},
  "counts": {"found": 35, "backed_up": 31, "skipped": 4, "failed": 0},
  "bytes_total": 89120000000,
  "dest": {"path": "/mnt/atlas/forge/backups/docker-backups", "free_bytes": 40000000000000},
@@ -85,7 +98,12 @@ removes or changes the meaning of a field bumps it.
       "rw": true, "alerting": false, "exempt": null}]},
    "x_backup": {"status": "none", "errors": [], "run_kind": "daily", "excluded": [],
                 "stale": [], "retention": null},
-   "snapshot": {"backend": "btrfs", "used": true, "fallback_reason": null, "snapshot_s": 1}},
+   "snapshot": {"backend": "btrfs", "used": true, "fallback_reason": null, "snapshot_s": 1},
+   "backends": {"restic": {"result": "ok", "reason": null, "snapshot_id": "…64 hex…",
+                           "duration_s": 95, "files_new": 12, "files_changed": 140,
+                           "files_unmodified": 9210, "data_added": 1900000000,
+                           "forget": {"result": "ok", "retention": {"daily": 7, "weekly": 4, "monthly": 0},
+                                      "kept": 11, "removed": 1}}}},
   {"name": "ollama", "...": "...",
    "x_backup": {"status": "ok", "errors": [], "run_kind": "daily",
                 "excluded": [{"path": "ollama/models/blobs", "reason": "re-pull with ollama pull",
@@ -123,6 +141,11 @@ removes or changes the meaning of a field bumps it.
 | `stacks[].coverage` | `status`: `ok`, `uncovered` (an alerting item without an exemption) or `unknown` (`docker compose config` failed; `error` has its first stderr line). `null` on an aborted run. |
 | `stacks[].x_backup` | the stack's backup tiers as this run applied them (0.7.0; USAGE.md "Backup tiers"). `status`: `none` (no block), `ok`, `config-error` (the block was rejected: `errors` says why, and the stack was backed up **in full**) or `unknown` (`docker compose config` failed, or the reader did; backed up in full). `excluded` lists what was left out: `tier` is `exclude` or `weekly`, `action` is `excluded` or `deferred` (a weekly path on a daily run; not the same thing for alerting), `exists` is `true`/`false`/`null` (could not be told, e.g. a root-only dir on an unprivileged run). `stale`: declared paths that do not exist (still excluded, not an error). `retention`: reserved for restic (0.8.0). `null` for a stack that never got that far (skipped before the stop, or an aborted run). |
 | `stacks[].snapshot` | present when a snapshot backend is in use (0.7.0; USAGE.md "Snapshots"), else `null`. `used`: archived from a snapshot. `fallback_reason` (archived the old way, stopped): `nested-subvolume`, `nested-dataset`, `mountpoint`, `snapdir-disabled`, `check-failed`, `create-failed`; `null` when the snapshot was used or the stack was stopped already (nothing to quiesce). `snapshot_s`: seconds to take it. `delete_failed`: the snapshot could not be deleted after its archive (the next run's sweep retries). |
+| `backends` / `tar_schedule` / `tar_ran` | the configured backends, tar's schedule (`daily` or `full`) and whether tar ran this run (0.8.0; RESTIC.md). |
+| `backend_last_success` | per backend, the `finished` of the last run in which it ran and failed for no stack, carried forward like `last_success`. A weekly tar keeps its time through the six days it does not run. `null` = never. |
+| `stacks[].backends` | per backend that ran for this stack (0.8.0): `tar` {`result`, `archive`, `bytes`}; `restic` {`result`, `reason` (on failure), `snapshot_id`, `duration_s`, `files_new`, `files_changed`, `files_unmodified`, `data_added`, `forget` {`result`: `ok`/`failed`/`refused`, `retention` {daily, weekly, monthly}, `kept`, `removed`}}. `result` is `ok` or `failed`; a stack is `backed_up` only if every backend scheduled for it succeeded, and its `reason` is then the first failure (`archive-failed` before a restic reason). The top-level `archive`/`bytes` stay tar's. `null` for a stack that never got that far. |
+| `restic` | with restic in `BACKENDS`, else `null` (0.8.0). `problem`: why restic could not be used at all this run (`restic-repo-missing`, `restic-password-wrong`, `restic-repo-locked`, `restic-helper-refused`, `restic-helper-failed`, `restic-repo-error`), else `null`. `forget`/`prune`/`check`: `result` this run (`ok`, `failed`, or `null` = not run), `last_success` carried forward. forget is `ok` only if every stack's forget was; `check.subset` is what was read. `orphan_stacks`: stacks with snapshots and no stack dir (their snapshots are never forgotten). `snapshots`, `stats`: the repository, from the helper. |
+| `restore_verified` | per backend, the last passing restore drill (`tests/host/restore-drill.sh --record-dest`), read from `restore-verified.json` next to `status.json`. That file is on the share and read like the previous status.json (untrusted: regular file, ≤ 64 KiB, this host, integer times in range, bounded printable strings). `null` if there is none. |
 | `snapshot_cleanup` | with a snapshot backend, else `null`: `failed` counts the deletes that failed this run, plus 1 if the start-of-run sweep failed; `swept` counts the leftovers from earlier runs that the sweep removed. A snapshot that is never deleted pins disk and keeps a frozen copy of the whole subvolume, so `failed > 0` is also in the notification text. |
 | `unowned_appdata` | every **directory** in `APPDATA_PATH` that matches no stack. Regular files and symlinks are skipped. `estimate: true` when `du` could not read everything (e.g. root-owned appdata, unprivileged run). `null` on an aborted run. |
 | `exemptions.status` | `ok`, `missing` (no file; no exemptions) or `config-error` (lines were rejected; `errors` lists them; the valid lines still apply). |
@@ -254,6 +277,20 @@ maximum, last success takes the oldest.
 | `dsb_snapshot_fallbacks` | | stacks archived the old way although a backend is set; only with a snapshot backend (0.7.0) |
 | `dsb_snapshot_cleanup_failures` | | snapshot deletes that failed, +1 if the sweep failed; only with a snapshot backend (0.7.0) |
 | `dsb_snapshot_leftovers_swept` | | leftovers from earlier runs removed by this run's sweep; only with a snapshot backend (0.7.0) |
+| `dsb_backend_enabled` | `backend` | 1 per configured backend (0.8.0) |
+| `dsb_backend_ran` | `backend` | 1 if the backend was scheduled in the last run (0.8.0) |
+| `dsb_backend_last_success_timestamp_seconds` | `backend` | carried forward; **0 = never** (0.8.0) |
+| `dsb_stack_backend_ok` | `stack`, `backend` | 1 ok / 0 failed; absent if the backend did not run for the stack (0.8.0) |
+| `dsb_stack_restic_files` | `stack`, `state` | files in the stack's restic snapshot: `new`, `changed`, `unmodified` (0.8.0) |
+| `dsb_stack_restic_data_added_bytes` | `stack` | (0.8.0) |
+| `dsb_stack_restic_duration_seconds` | `stack` | (0.8.0) |
+| `dsb_restic_repo_available` | | 0 when `restic.problem` is set (0.8.0) |
+| `dsb_restic_task_last_success_timestamp_seconds` | `task` | forget/prune/check, carried forward; **0 = never** (0.8.0) |
+| `dsb_restic_task_failed` | `task` | 1 if the task ran and failed in the last run (0.8.0) |
+| `dsb_restic_orphan_stacks` | | (0.8.0) |
+| `dsb_restic_snapshots` | | this host's snapshots in the repository (0.8.0) |
+| `dsb_restic_repo_bytes` / `dsb_restic_repo_uncompressed_bytes` | | repository size (0.8.0) |
+| `dsb_restore_verified_timestamp_seconds` | `backend` | last passing restore drill; absent if none recorded (0.8.0) |
 
 On an aborted run the per-stack result and coverage series are absent (the loop did not
 run); the host series and `dsb_stack_last_success_timestamp_seconds` are still written.
@@ -301,6 +338,42 @@ a label set, and `+` matches nothing: the alert can never fire. Up to 0.6.0 this
   expr: sum by (host) (dsb_snapshot_fallbacks) > 0
   for: 1h
   labels: {severity: info}
+```
+
+For restic (0.8.0). The "never ran" cases are deliberate: a restic run whose forget, prune
+or check has never succeeded has 0 there, and fires.
+
+```yaml
+# restic unusable this run (missing repository, wrong password, helper failure).
+- alert: DockerStackBackupResticUnavailable
+  expr: dsb_restic_repo_available == 0
+  for: 10m
+
+# Retention is not running: no successful forget for 2 days, or prune/check for 9 days
+# (both run on the weekly full run by default). "Configured" is not evidence; this is.
+- alert: DockerStackBackupResticForgetStale
+  expr: dsb_backend_enabled{backend="restic"} == 1 and on (host) (time() - dsb_restic_task_last_success_timestamp_seconds{task="forget"} > 2 * 86400)
+  for: 1h
+- alert: DockerStackBackupResticMaintenanceStale
+  expr: dsb_backend_enabled{backend="restic"} == 1 and on (host) (time() - dsb_restic_task_last_success_timestamp_seconds{task=~"prune|check"} > 9 * 86400)
+  for: 1h
+- alert: DockerStackBackupResticCheckFailed
+  expr: dsb_restic_task_failed{task="check"} == 1
+
+# A backend has not had a good run in its window: a day for daily, 8 days for a weekly tar.
+- alert: DockerStackBackupBackendStale
+  expr: >
+    (time() - dsb_backend_last_success_timestamp_seconds{backend="restic"} > 26 * 3600)
+    or (time() - dsb_backend_last_success_timestamp_seconds{backend="tar"} > 8 * 86400)
+  for: 30m
+
+# No verified restore of a backend for 35 days (0.8.0: tests/host/restore-drill.sh).
+# Absent until the first drill is recorded; the `absent` arm makes that fire too.
+- alert: DockerStackBackupRestoreUnverified
+  expr: >
+    (time() - dsb_restore_verified_timestamp_seconds > 35 * 86400)
+    or on (host, backend) (dsb_backend_enabled == 1 unless on (host, backend) dsb_restore_verified_timestamp_seconds)
+  for: 1h
 ```
 
 `dsb_stack_xbackup_config_error` exists from 0.7.0. On a host still on 0.6.0 that term
