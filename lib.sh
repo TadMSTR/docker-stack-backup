@@ -396,20 +396,24 @@ validate_backends() {
                 ok=1
             fi
         done
-        # The helper's own range rule, so a bad value stops the run here and not at every
-        # full run's check: n/N with 1 <= n <= N, or x% of at most 100.
+        # restic's own range rule (0.18 checkFlags), as the helper applies it, so a bad value
+        # stops the run here and not at every full run's check: n/N with 1 <= n <= N <= 256,
+        # or x% above 0 and at most 100 (audit p5b CR-02, R2-01).
         local subset="${RESTIC_CHECK_SUBSET:-}" subset_ok=false
         if [[ "$subset" == auto ]]; then
             subset_ok=true
         elif [[ "$subset" =~ ^([0-9]{1,4})/([0-9]{1,4})$ ]]; then
-            (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 10#${BASH_REMATCH[2]} )) && subset_ok=true
+            (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 10#${BASH_REMATCH[2]} \
+               && 10#${BASH_REMATCH[2]} <= 256 )) && subset_ok=true
         elif [[ "$subset" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?%$ ]]; then
-            if (( 10#${BASH_REMATCH[1]} < 100 )) || { (( 10#${BASH_REMATCH[1]} == 100 )) && [[ "${BASH_REMATCH[3]:-0}" =~ ^0+$ ]]; }; then
+            local whole=$((10#${BASH_REMATCH[1]})) frac="${BASH_REMATCH[3]:-0}"
+            if { (( whole > 0 )) || [[ ! "$frac" =~ ^0+$ ]]; } \
+               && { (( whole < 100 )) || { (( whole == 100 )) && [[ "$frac" =~ ^0+$ ]]; }; }; then
                 subset_ok=true
             fi
         fi
         if [[ "$subset_ok" != true ]]; then
-            log_error "RESTIC_CHECK_SUBSET must be auto, n/N (1 <= n <= N) or x% (at most 100) (got: '$(printable "$subset")')"
+            log_error "RESTIC_CHECK_SUBSET must be auto, n/N (1 <= n <= N <= 256) or x% (above 0, at most 100) (got: '$(printable "$subset")')"
             ok=1
         fi
     fi

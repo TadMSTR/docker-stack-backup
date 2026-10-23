@@ -134,12 +134,22 @@ teardown() {
     docker compose -p dsb-drill down 2>&1
     local left; left=$(docker ps -aq --filter label=com.docker.compose.project=dsb-drill)
     echo "dsb-drill containers left: ${left:-none}"
+    # Close the transcript (tee runs in a process substitution) and wait for it, so the copy
+    # holds every line; then remove the scratch dir and record whether that worked in the
+    # results too, where the copy above could not (audit p5b R2-02).
+    exec 1>&3 2>&4
+    [[ -n "${TEE_PID:-}" ]] && wait "$TEE_PID" 2>/dev/null
     if [[ -d "$OUT" ]]; then
         mkdir -p "$RESULTS" && cp -a "$OUT"/. "$RESULTS"/
-        [[ -n "${SUDO_USER:-}" ]] && chown -R "$SUDO_USER:" "$RESULTS"
     fi
     rm -rf -- /tmp/dsb-drill
-    if [[ -e $D ]]; then echo "WARN: $D still present"; else echo "$D removed"; fi
+    local cleanup
+    if [[ -e $D ]]; then cleanup="WARN: $D still present"; else cleanup="$D removed"; fi
+    echo "$cleanup"
+    if [[ -d "$RESULTS" ]]; then
+        printf 'containers left: %s\n%s\n' "${left:-none}" "$cleanup" > "$RESULTS/teardown.txt"
+        [[ -n "${SUDO_USER:-}" ]] && chown -R "$SUDO_USER:" "$RESULTS"
+    fi
 }
 on_exit() {
     local rc=$?
@@ -153,7 +163,9 @@ chmod 0755 -- "$D"   # RESTIC_RUN_AS must traverse it to reach the scratch repos
 mkdir -p "$OUT" "$D/tmp" "$D/run" "$D/stacks/dsb-drill" "$A" "$D/backups" "$D/safety" "$S"
 export TMPDIR=$D/tmp
 unset BACKUP_BASE
+exec 3>&1 4>&2
 exec > >(tee "$OUT/drill-transcript.txt") 2>&1
+TEE_PID=$!
 # Setup steps must not fail quietly (CR-04): errexit until the checks start (step 3),
 # where check() expects commands to fail and records them instead.
 set -e

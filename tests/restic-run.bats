@@ -357,13 +357,13 @@ STUB
     export RESTIC_KEEP_DAILY=7
     # Shape and range, as the helper checks them (CR-02): refused at config time.
     local sub
-    for sub in "1/2;id" 0/4 5/4 150% 100.5% 1/0; do
+    for sub in "1/2;id" 0/4 5/4 1/257 150% 100.5% 0% 0.0% 1/0; do
         export RESTIC_CHECK_SUBSET="$sub"
         run_backup
         [ "$status" -eq 1 ] || { echo "accepted: $sub" >&2; false; }
         [[ "$output" == *"RESTIC_CHECK_SUBSET must be"* ]]
     done
-    for sub in 1/12 12/12 100% 2.5%; do
+    for sub in 1/12 12/12 256/256 100% 2.5% 0.5% 0.01%; do
         export RESTIC_CHECK_SUBSET="$sub"
         run_backup
         [[ "$output" != *"RESTIC_CHECK_SUBSET must be"* ]] || { echo "refused: $sub" >&2; false; }

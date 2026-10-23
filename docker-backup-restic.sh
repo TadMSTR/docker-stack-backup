@@ -453,12 +453,16 @@ exec "$@"'
         expect_args $# 1
         subset="$1"
         if [[ "$subset" =~ ^([0-9]{1,4})/([0-9]{1,4})$ ]]; then
-            (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 10#${BASH_REMATCH[2]} )) \
-                || refuse "invalid subset: n/N needs 1 <= n <= N"
+            # restic's limits (0.18 checkFlags): at most 256 buckets.
+            (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 10#${BASH_REMATCH[2]} \
+               && 10#${BASH_REMATCH[2]} <= 256 )) \
+                || refuse "invalid subset: n/N needs 1 <= n <= N <= 256"
             subset="$((10#${BASH_REMATCH[1]}))/$((10#${BASH_REMATCH[2]}))"
         elif [[ "$subset" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?%$ ]]; then
-            (( 10#${BASH_REMATCH[1]} < 100 )) || { (( 10#${BASH_REMATCH[1]} == 100 )) && [[ "${BASH_REMATCH[3]:-0}" =~ ^0+$ ]]; } \
-                || refuse "invalid subset: at most 100%"
+            whole=$((10#${BASH_REMATCH[1]})) frac="${BASH_REMATCH[3]:-0}"
+            { (( whole > 0 )) || [[ ! "$frac" =~ ^0+$ ]]; } \
+                && { (( whole < 100 )) || { (( whole == 100 )) && [[ "$frac" =~ ^0+$ ]]; }; } \
+                || refuse "invalid subset: above 0% and at most 100%"
         else
             refuse "invalid subset (n/N or x%)"
         fi

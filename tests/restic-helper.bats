@@ -265,7 +265,7 @@ seed_days() {   # seed_days <stack> <host> <n> — one snapshot a day, n days ba
     run bash "$RH" check 2.5%
     [ "$status" -eq 0 ]
     local bad
-    for bad in 0/4 5/4 101% 100.5% 150% "1/4 --x" "--read-data" "1/4;id" "" 1/0; do
+    for bad in 0/4 5/4 1/257 101% 100.5% 150% 0% 0.0% 0.00% "1/4 --x" "--read-data" "1/4;id" "" 1/0; do
         run bash "$RH" check "$bad"
         [ "$status" -eq 2 ]
     done
@@ -422,11 +422,36 @@ STUB
     [ "$(rh_restic snapshots --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 0 ]
 }
 
-@test "F-01: a stack dir that is itself a symlink, or reached through one, is refused at the check" {
+@test "F-01: a stack dir that is itself a symlink is refused at the check" {
     rh_setup_ns
     mv "$RH_APPDATA/web" "$RH_D/web-real"
     ln -s "$RH_D/web-real" "$RH_APPDATA/web"
     run rh_ns backup "$RH_TMP" web 20261023_020001 daily
     [ "$status" -eq 2 ]
     rm -f "$RH_APPDATA/web"; mv "$RH_D/web-real" "$RH_APPDATA/web"
+}
+
+@test "F-01: a stack dir reached through a symlinked parent is refused (the pre-F-01 helper backed it up)" {
+    rh_setup_ns
+    ln -s "$RH_APPDATA" "$RH_D/applink"
+    local link_expr="s|^ALLOWED_APPDATA_PATH=.*|ALLOWED_APPDATA_PATH=\"$RH_D/applink\"|"
+    # Probe first: the helper as it was before the F-01 fix (b574766) accepts the path.
+    if git -C "$BATS_TEST_DIRNAME/.." cat-file -e b574766 2>/dev/null; then
+        git -C "$BATS_TEST_DIRNAME/.." show b574766:docker-backup-restic.sh > "$RH_D/old-helper.sh"
+        cp "$RH" "$RH.keep"
+        sed -e "s|^ALLOWED_APPDATA_PATH=.*|ALLOWED_APPDATA_PATH=\"$RH_D/applink\"|" \
+            -e "s|^RESTIC_BIN=.*|RESTIC_BIN=\"$RH_BIN\"|" -e "s|^RESTIC_REPO=.*|RESTIC_REPO=\"$RH_REPO\"|" \
+            -e "s|^RESTIC_PASSWORD_FILE=.*|RESTIC_PASSWORD_FILE=\"$RH_PW\"|" -e "s|^RESTIC_RUN_AS=.*|RESTIC_RUN_AS=\"root\"|" \
+            -e "s|^RESTIC_HOST=.*|RESTIC_HOST=\"$RH_HOST\"|" -e "s|^RESTIC_CACHE_DIR=.*|RESTIC_CACHE_DIR=\"$RH_CACHE\"|" \
+            -e "s|^RESTIC_STAGE_DIR=.*|RESTIC_STAGE_DIR=\"$RH_STAGE\"|" \
+            -e "s|^PATH=.*|PATH=\"$RH_D/shim:/usr/sbin:/usr/bin:/sbin:/bin\"|" \
+            -e 's|^\[\[ "\$run_uid" != 0 \]\] .*|: # test copy|' "$RH_D/old-helper.sh" > "$RH"
+        run rh_ns backup "$RH_TMP" web 20261023_020001 daily
+        [ "$status" -eq 0 ]                                     # fires
+        cp "$RH.keep" "$RH"
+    fi
+    rh_write root -e 's|^\[\[ "\$run_uid" != 0 \]\] .*|: # test copy: RESTIC_RUN_AS is the namespace root|' -e "$link_expr"
+    run rh_ns backup "$RH_TMP" web 20261023_020002 daily
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"not a plain directory at its canonical path"* ]]
 }
