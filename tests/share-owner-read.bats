@@ -91,6 +91,12 @@ direct_reads() {
     grep '^direct ' "$SHARE_LOG" | grep -v "^direct stat -c %u:%g -- $BACKUP_BASE\(/[^/]*\)\?\$" || true
 }
 
+# plain_line <exact line> — $output, colour codes removed, has that exact line (CR-11/13:
+# a wildcard match let the digit in a later ESC[0;31m stand in for the count).
+plain_line() {
+    sed 's/\x1b\[[0-9;]*m//g' <<< "$output" | grep -qx -- "$1"
+}
+
 @test "probe: v0.7.0's restore reads the share directly as root" {
     git -C "$REPO" cat-file -e v0.7.0 2>/dev/null || skip "v0.7.0 not in this checkout"
     local old="$TEST_DIR/v070"
@@ -113,7 +119,7 @@ direct_reads() {
     grep -q '^setpriv uid=4242 cat -- .*web.tar.gz' "$SHARE_LOG"
     grep -q '^setpriv uid=4242 find .*/backups/testhost ' "$SHARE_LOG"
     # The extract itself ran as root (tar -x reads stdin): restored owners are kept.
-    ! grep -q '^setpriv .* tar ' "$SHARE_LOG"
+    ! grep -q '^setpriv .* tar ' "$SHARE_LOG" || false
 }
 
 @test "probe then fix: verify --list/--verify/--stats read the share as its owner (v0.7.0 read it as root)" {
@@ -135,14 +141,14 @@ direct_reads() {
     [ -z "$(direct_reads)" ] || { direct_reads >&2; false; }
     grep -q '^setpriv uid=4242 tar -tf .*web.tar.gz' "$SHARE_LOG"
     run unshare -r bash "$REPO/backup-verify.sh" --verify
-    [[ "$output" == *"Valid: "*"1"* ]]
+    plain_line "Valid: 1"
 }
 
 @test "as_owner_of runs as is for a non-root caller, and for a root-owned path" {
     run bash -c 'source "$1/lib.sh"; as_owner_of "$2" echo plain' _ "$REPO" "$BACKUP_BASE"
     [ "$output" = plain ]
-    ! grep -q '^setpriv' "$SHARE_LOG"
+    ! grep -q '^setpriv' "$SHARE_LOG" || false
     run unshare -r bash -c 'source "$1/lib.sh"; as_owner_of "$2" echo rootowned' _ "$REPO" "$TEST_DIR/src"
     [ "$output" = rootowned ]
-    ! grep -q '^setpriv' "$SHARE_LOG"
+    ! grep -q '^setpriv' "$SHARE_LOG" || false
 }

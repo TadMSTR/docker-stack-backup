@@ -23,6 +23,12 @@ teardown() {
     rm -rf -- "$TEST_DIR"
 }
 
+# plain_line <exact line> — $output, colour codes removed, has that exact line (CR-11/13:
+# a wildcard match let the digit in a later ESC[0;31m stand in for the count).
+plain_line() {
+    sed 's/\x1b\[[0-9;]*m//g' <<< "$output" | grep -qx -- "$1"
+}
+
 @test "probe: v0.7.0's verify reports an unreadable run dir as nothing at all" {
     git -C "$REPO" cat-file -e v0.7.0 2>/dev/null || skip "v0.7.0 not in this checkout"
     local old="$TEST_DIR/v070"
@@ -30,7 +36,8 @@ teardown() {
     git -C "$REPO" show v0.7.0:backup-verify.sh > "$old/backup-verify.sh"
     git -C "$REPO" show v0.7.0:lib.sh > "$old/lib.sh"
     run bash "$old/backup-verify.sh" --verify
-    [[ "$output" == *"Invalid: "*"0"* ]]                  # fires: the unreadable set is invisible
+    plain_line "Invalid: 0"                                # fires: the unreadable set is invisible
+    plain_line "Total backups checked: 1"
     [[ "$output" != *"20261024_020001"* ]]
 }
 
@@ -38,8 +45,8 @@ teardown() {
     run bash "$REPO/backup-verify.sh" --verify
     echo "$output" >&3
     [[ "$output" == *"cannot read h/20261024_020001 as its owner"* ]]
-    [[ "$output" == *"Valid: "*"1"* ]]
-    [[ "$output" == *"Invalid: "*"1"* ]]
+    plain_line "Valid: 1"
+    plain_line "Invalid: 1"
 }
 
 @test "restore Step 3 refuses an unreadable run dir instead of saying it holds no stacks" {

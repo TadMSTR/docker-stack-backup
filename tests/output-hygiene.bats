@@ -39,7 +39,7 @@ teardown() {
     [ "$status" -ne 0 ]
     grep -q '^\[SUCCESS\] ' "$LOG_FILE"
     grep -q '^\[ERROR\] ' "$LOG_FILE"
-    ! grep -q $'\033' "$LOG_FILE"
+    ! grep -q $'\033' "$LOG_FILE" || false
     # log()'s timestamp format is unchanged: cron log readers parse it.
     grep -qE '^\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] ' "$LOG_FILE"
 }

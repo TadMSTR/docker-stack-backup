@@ -158,8 +158,8 @@ _run_dir() {
     mkdir -p "$evil" && touch -d "2020-01-01" "$evil"
     run bash "$SCRIPT"
     [ "$status" -eq 0 ]
-    ! grep -q $'\033' "$LOG_FILE"
-    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
+    ! grep -q $'\033' "$LOG_FILE" || false
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE" || false
 }
 
 @test "a run dir under a parent whose name holds control bytes is skipped too (round 4 R4-02)" {

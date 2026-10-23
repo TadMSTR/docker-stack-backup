@@ -44,9 +44,9 @@ _pings() { grep '^CONFIG: url' "$CURL_LOG" | sed 's/^CONFIG: //'; }
 @test "the URL is never on curl's argv and never in the log or output" {
     run_backup
     [ "$status" -eq 0 ]
-    ! grep '^ARGV:' "$CURL_LOG" | grep -q SECRET-KEY
+    ! grep '^ARGV:' "$CURL_LOG" | grep -q SECRET-KEY || false
     grep '^ARGV:' "$CURL_LOG" | grep -q -- '-K'
-    ! grep -q SECRET-KEY "$LOG"
+    ! grep -q SECRET-KEY "$LOG" || false
     [[ "$output" != *SECRET-KEY* ]]
 }
 

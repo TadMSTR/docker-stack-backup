@@ -64,9 +64,9 @@ parity() {
     sed -i 's|exclude_args+=(--exclude "\$RESTIC_STAGE_DIR/\$stack/\$rel")|exclude_args+=(--exclude "$rel")|' "$RH"
     grep -q 'exclude_args+=(--exclude "$rel")' "$RH"
     ns_backup
-    ! parity
+    ! parity || false
     grep -q "^$STACK/x/a/b/f$" "$TEST_DIR/tar.list"
-    ! grep -q "^$STACK/x/a/b/f$" "$TEST_DIR/restic.list"
+    ! grep -q "^$STACK/x/a/b/f$" "$TEST_DIR/restic.list" || false
 }
 
 @test "V1: tar and restic leave out exactly the same files, for every declared-path and global-pattern case" {
@@ -135,6 +135,7 @@ tv() {
     # State B: what the restore replaces.
     printf 'state B, longer\n' > "$a/db/page"
     echo added > "$a/added"
+    cp "$DOCKHAND_BASE/$STACK/docker-compose.yml" "$TEST_DIR/compose-at-backup.yml"
     echo "services: {changed: {}}" > "$DOCKHAND_BASE/$STACK/docker-compose.yml"
     : > "$DOCKER_LOG"
     export LOG_FILE="$TEST_DIR/restore.log"
@@ -147,7 +148,9 @@ tv() {
     [[ "$output" == *REACHED_END* ]]
     [[ "$output" == *"restic snapshots of this host"* ]]
     [ "$(cd "$a" && find . -printf '%P %m %y %l %s\n' | sort)" = "$manifest_a" ]
-    [ "$(cat "$DOCKHAND_BASE/$STACK/docker-compose.yml")" = "$(cat "$TEST_DIR/../$(basename "$TEST_DIR")/docker/$STACK/docker-compose.yml")" ]
+    # The compose file is the one backed up, not the mutated one (CR-09: this compared the
+    # file with itself).
+    cmp "$TEST_DIR/compose-at-backup.yml" "$DOCKHAND_BASE/$STACK/docker-compose.yml"
     grep -q "$APPDATA_PATH/$STACK:/data" "$DOCKHAND_BASE/$STACK/docker-compose.yml"
     # Extract before down: the stub saw `compose down` only after the extract succeeded.
     grep -q 'compose down' "$DOCKER_LOG"
@@ -164,6 +167,6 @@ tv() {
         perform_restore' _ "$BATS_TEST_DIRNAME/../docker-stack-restore.sh" "$STACK"
     [ "$status" -ne 0 ]
     [[ "$output" == *"nothing was changed"* ]]
-    ! grep -q 'compose down' "$DOCKER_LOG"
+    ! grep -q 'compose down' "$DOCKER_LOG" || false
     [ "$(cat "$APPDATA_PATH/$STACK/data.txt")" = appdata-content ]
 }

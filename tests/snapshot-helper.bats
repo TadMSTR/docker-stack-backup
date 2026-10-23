@@ -94,8 +94,8 @@ teardown() {
     run "$SNAP_HELPER" check st
     chmod 755 "$SNAP_APPDATA/st/locked"
     [ "$status" -eq 1 ]
-    ! grep -qx ok <<< "$output"
-    ! grep -q '^fallback' <<< "$output"
+    ! grep -qx ok <<< "$output" || false
+    ! grep -q '^fallback' <<< "$output" || false
 }
 
 @test "btrfs sweep: removes only dsb-<stack>-<ts> subvolumes, prints each" {

@@ -58,7 +58,7 @@ _run_manual() {
     [[ "$output" == *"$STACK"*"state unknown"* ]]
     [[ "$output" == *"Status: "*"state unknown"* ]]
     [[ "$output" != *"All containers stopped"* ]]
-    ! grep -q "$STACK.*(appdata: .*stopped" <<< "$output"
+    ! grep -q "$STACK.*(appdata: .*stopped" <<< "$output" || false
     [[ "$output" == *"Backup cancelled."* ]]
 }
 
