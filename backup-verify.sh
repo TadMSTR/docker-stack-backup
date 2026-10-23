@@ -52,17 +52,48 @@ Examples:
 EOF
 }
 
+# The share is read AS ITS OWNER (#1089): archives are 0600 in 0700 run dirs since 0.8.0,
+# and on an NFS export with root squash root cannot read them. Under BACKUP_BASE as its
+# owner, under a host dir as the host dir's owner (lib.sh as_owner_of). As a non-root
+# user, everything runs as is.
+
+# names <owner_path> <dir> <find tests...> — NUL-separated, sorted names directly in <dir>.
+# Dot-names are left out, as the globs this replaces did.
+names() {
+    local owner="$1" dir="$2"; shift 2
+    as_owner_of "$owner" find "$dir" -mindepth 1 -maxdepth 1 ! -name '.*' "$@" -printf '%f\0' 2>/dev/null | sort -z
+}
+
+# hsize <owner_path> <path> — du -sh's number only (never the rest of a name).
+hsize() {
+    local out
+    out=$(as_owner_of "$1" du -sh -- "$2" 2>/dev/null) || true
+    out="${out%%[[:space:]]*}"
+    echo "${out:-0}"
+}
+
+hosts() {
+    local -a h=()
+    share_dir_readable "$BACKUP_BASE" "$BACKUP_BASE" \
+        || printf '%b✗ cannot read %s as its owner%b\n' "$RED" "$(printable "$BACKUP_BASE")" "$NC" >&2
+    mapfile -d '' -t h < <(names "$BACKUP_BASE" "$BACKUP_BASE" -type d)
+    # printf with no arguments still prints one NUL: an empty share would become one
+    # host named "" (CR-01).
+    if [[ ${#h[@]} -gt 0 ]]; then
+        printf '%s\0' "${h[@]}"
+    fi
+}
+
 list_backups() {
     local hostname_filter="$1"
     
     echo -e "${BLUE}=== Backup Listing ===${NC}\n"
     
-    for host_dir in "$BACKUP_BASE"/*; do
-        if [[ ! -d "$host_dir" ]]; then
-            continue
-        fi
-        
-        local hostname; hostname=$(basename "$host_dir")
+    local -a hostnames=()
+    mapfile -d '' -t hostnames < <(hosts)
+    local hostname
+    for hostname in "${hostnames[@]+"${hostnames[@]}"}"; do
+        local host_dir="$BACKUP_BASE/$hostname"
         
         if [[ -n "$hostname_filter" && "$hostname" != "$hostname_filter" ]]; then
             continue
@@ -70,24 +101,23 @@ list_backups() {
         
         printf '%bHost: %s%b\n' "$GREEN" "$(printable "$hostname")" "$NC"
         
-        for backup_dir in "$host_dir"/*; do
-            if [[ ! -d "$backup_dir" ]]; then
-                continue
-            fi
-            
-            local timestamp; timestamp=$(basename "$backup_dir")
-            local backup_count; backup_count=$(find "$backup_dir" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || backup_count=0
-            local total_size; total_size=$(du_size "$backup_dir" -h) || true
+        local -a runs=()
+        mapfile -d '' -t runs < <(names "$host_dir" "$host_dir" -type d)
+        local timestamp
+        for timestamp in "${runs[@]+"${runs[@]}"}"; do
+            local backup_dir="$host_dir/$timestamp"
+            local backup_count; backup_count=$(as_owner_of "$host_dir" find "$backup_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf x 2>/dev/null | wc -c) || backup_count=0
+            local total_size; total_size=$(hsize "$host_dir" "$backup_dir")
             
             echo "  $(printable "$timestamp") - $backup_count stacks - $total_size"
             
-            for backup_file in "$backup_dir"/*.tar.* "$backup_dir"/*.tar; do
-                if [[ -f "$backup_file" ]]; then
-                    local fname; fname=$(basename "$backup_file")
-                    local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
-                    local file_size; file_size=$(du_size "$backup_file" -h) || true
-                    echo "    - $(printable "$stack_name") ($file_size)"
-                fi
+            local -a files=()
+            mapfile -d '' -t files < <(names "$host_dir" "$backup_dir" -type f \( -name '*.tar.*' -o -name '*.tar' \))
+            local fname
+            for fname in "${files[@]+"${files[@]}"}"; do
+                local stack_name="${fname%.tar.*}"; stack_name="${stack_name%.tar}"
+                local file_size; file_size=$(hsize "$host_dir" "$backup_dir/$fname")
+                echo "    - $(printable "$stack_name") ($file_size)"
             done
         done
         echo
@@ -103,29 +133,43 @@ verify_backups() {
     local total_valid=0
     local total_invalid=0
     
-    for host_dir in "$BACKUP_BASE"/*; do
-        if [[ ! -d "$host_dir" ]]; then
-            continue
-        fi
-        
-        local hostname; hostname=$(basename "$host_dir")
+    local -a hostnames=()
+    mapfile -d '' -t hostnames < <(hosts)
+    local hostname
+    for hostname in "${hostnames[@]+"${hostnames[@]}"}"; do
+        local host_dir="$BACKUP_BASE/$hostname"
         
         if [[ -n "$hostname_filter" && "$hostname" != "$hostname_filter" ]]; then
             continue
         fi
         
         printf '%bVerifying: %s%b\n' "$GREEN" "$(printable "$hostname")" "$NC"
+        # An unreadable host or run dir is a failure, never an empty one (SH-15).
+        local -a unreadable=()
+        mapfile -d '' -t unreadable < <(
+            share_dir_readable "$host_dir" "$host_dir" || printf '%s\0' "$host_dir"
+            local r
+            while IFS= read -r -d '' r; do
+                share_dir_readable "$host_dir" "$host_dir/$r" || printf '%s\0' "$host_dir/$r"
+            done < <(names "$host_dir" "$host_dir" -type d))
+        local u
+        for u in "${unreadable[@]+"${unreadable[@]}"}"; do
+            printf '  %b✗%b cannot read %s as its owner\n' "$RED" "$NC" "$(printable "${u#"$BACKUP_BASE"/}")"
+            total_checked=$((total_checked + 1))
+            total_invalid=$((total_invalid + 1))
+        done
         
-        for backup_file in "$host_dir"/*/*.tar.* "$host_dir"/*/*.tar; do
-            if [[ ! -f "$backup_file" ]]; then
-                continue
-            fi
-            
+        local -a archives=()
+        mapfile -d '' -t archives < <(as_owner_of "$host_dir" find "$host_dir" -mindepth 2 -maxdepth 2 \
+            -type f \( -name '*.tar.*' -o -name '*.tar' \) ! -path "$host_dir/.*" ! -name '.*' -print0 2>/dev/null | sort -z)
+        local backup_file
+        for backup_file in "${archives[@]+"${archives[@]}"}"; do
             total_checked=$((total_checked + 1))
             
-            local relative_path="${backup_file#$BACKUP_BASE/}"
+            local relative_path="${backup_file#"$BACKUP_BASE"/}"
             
-            if tar -tf "$backup_file" &>/dev/null; then
+            # tar runs as the archive's owner too: a listing needs no root.
+            if as_owner_of "$host_dir" tar -tf "$backup_file" &>/dev/null; then
                 printf '  %b✓%b %s\n' "$GREEN" "$NC" "$(printable "$relative_path")"
                 total_valid=$((total_valid + 1))
             else
@@ -147,19 +191,18 @@ show_stats() {
     
     echo -e "${BLUE}=== Backup Statistics ===${NC}\n"
     
-    for host_dir in "$BACKUP_BASE"/*; do
-        if [[ ! -d "$host_dir" ]]; then
-            continue
-        fi
-        
-        local hostname; hostname=$(basename "$host_dir")
+    local -a hostnames=()
+    mapfile -d '' -t hostnames < <(hosts)
+    local hostname
+    for hostname in "${hostnames[@]+"${hostnames[@]}"}"; do
+        local host_dir="$BACKUP_BASE/$hostname"
         
         if [[ -n "$hostname_filter" && "$hostname" != "$hostname_filter" ]]; then
             continue
         fi
         
-        local backup_sets; backup_sets=$(find "$host_dir" -mindepth 1 -maxdepth 1 -type d | wc -l) || backup_sets=0
-        local total_size; total_size=$(du_size "$host_dir" -h) || true
+        local backup_sets; backup_sets=$(as_owner_of "$host_dir" find "$host_dir" -mindepth 1 -maxdepth 1 -type d -printf x 2>/dev/null | wc -c) || backup_sets=0
+        local total_size; total_size=$(hsize "$host_dir" "$host_dir")
 
         # One pass: count, oldest and newest mtime (as YYYY-MM-DD) from a single find.
         # awk reads to EOF. `sort | head -1` here died of SIGPIPE (rc 141 under
@@ -167,7 +210,7 @@ show_stats() {
         # archives, every time (#1099).
         local total_backups=0 oldest_backup="" newest_backup=""
         read -r total_backups oldest_backup newest_backup < <(
-            find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T@ %TY-%Tm-%Td\n' 2>/dev/null |
+            as_owner_of "$host_dir" find "$host_dir" \( -name "*.tar.*" -o -name "*.tar" \) -printf '%T@ %TY-%Tm-%Td\n' 2>/dev/null |
                 awk 'NR == 1 || $1 < min { min = $1; old = $2 }
                      NR == 1 || $1 > max { max = $1; new = $2 }
                      END { print NR, old, new }'

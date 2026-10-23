@@ -16,11 +16,15 @@ docker-stack-backup-manual.sh  Manual backup for a single named stack
 backup-verify.sh               Integrity verification for existing backup archives
 cleanup-old-backups.sh         Prune backups older than the configured retention window
 lib.sh                         Shared functions, sourced by every script; DSB_VERSION
+docker-backup-tar-create.sh    Root helper: tar of one stack (ELEVATION.md)
+docker-backup-snapshot.sh      Root helper: btrfs/ZFS snapshots (ELEVATION.md)
+docker-backup-restic.sh        Root helper: restic, as a dedicated uid (RESTIC.md)
+tests/host/restore-drill.sh    Host acceptance drill, run as root (both backends)
 dsb_status.py                  Run status helper (python3 -I, stdlib only): status.json,
                                .prom, coverage classifier, exemptions. See STATUS.md
 ```
 
-Reference docs: `STATUS.md` (the status contract: its schema, reasons, classes and
+Reference docs: `RESTIC.md` (the restic backend), `STATUS.md` (the status contract: its schema, reasons, classes and
 metrics are an interface; additive changes keep `schema: 1`), `USAGE.md`, `SAFETY_FEATURES.md`, `DRY_RUN.md`, `COMPRESSION.md`, `NOTIFICATIONS.md`, `OS_COMPATIBILITY.md`, `HOMELAB_SETUP.md`.
 
 ## When editing scripts

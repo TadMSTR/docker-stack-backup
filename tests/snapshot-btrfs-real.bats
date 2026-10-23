@@ -150,7 +150,7 @@ teardown() {
     bash "$TAR_HELPER" none "$TEMP_SRC" "$APPDATA" web --from-snapshot "$TS" -- web/db/pages > "$SCR/snap.tar"
     bash "$TAR_HELPER" none "$TEMP_SRC" "$APPDATA" web -- web/db/pages > "$SCR/live.tar"
     diff <(tar -tf "$SCR/snap.tar" | sort) <(tar -tf "$SCR/live.tar" | sort)
-    ! tar -tf "$SCR/snap.tar" | grep -q '^web/db/pages'
+    ! tar -tf "$SCR/snap.tar" | grep -q '^web/db/pages' || false
     tar -tf "$SCR/snap.tar" | grep -qx 'web/db/key'
     "$SNAP_HELPER" delete web "$TS"
 }

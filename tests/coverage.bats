@@ -81,7 +81,7 @@ _classes() { js "$R" '[i["class"] for i in d["stacks"][0]["coverage"]["items"]]'
 
 @test "the compose file's own text is never read: a mount only the config JSON knows is classified" {
     # The stub compose file mentions no host-rw path; only `compose config` does.
-    ! grep -q host-rw "$ST/docker-compose.yml"
+    ! grep -q host-rw "$ST/docker-compose.yml" || false
     _report
     [ "$(js "$R" '"'"$TEST_DIR/host-rw"'" in [i["source"] for i in d["stacks"][0]["coverage"]["items"]]')" = true ]
 }
@@ -174,7 +174,7 @@ EOF
     [ "$(js "$R" 'd["unowned_appdata"][0]["exempt"]')" = '"valid line"' ]
     [ "$(js "$R" 'd["summary"]["status"]')" = '"config-error"' ]
     # Diagnostics are printable: no raw ESC reaches the log.
-    ! grep -q $'\x1b' "$TEST_DIR/report.err"
+    ! grep -q $'\x1b' "$TEST_DIR/report.err" || false
 }
 
 @test 'a command substitution in a reason is inert data' {

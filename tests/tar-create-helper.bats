@@ -192,7 +192,7 @@ old_helper() {
     ln -s "$secret" "$link"
     local nolink="$TEST_DIR/helper-no-L.sh"
     grep -v 'temp_dir is a symlink' "$HELPER" > "$nolink"
-    ! grep -q 'temp_dir is a symlink' "$nolink"
+    ! grep -q 'temp_dir is a symlink' "$nolink" || false
     run bash "$nolink" none "$link" "$APPDATA" mystack
     [ "$status" -eq 2 ]
     [[ "$output" == *"temp_dir was replaced while it was being entered"* ]]
@@ -202,7 +202,7 @@ old_helper() {
     # then the staging (below) is all that is left, and it archives none of the target.
     grep -v 'was replaced while it was being entered' "$nolink" > "$TEST_DIR/helper-naive.sh"
     bash "$TEST_DIR/helper-naive.sh" none "$link" "$APPDATA" mystack > "$TEST_DIR/naive.tar"
-    ! tar -tf "$TEST_DIR/naive.tar" | grep -q 'shadow-like'
+    ! tar -tf "$TEST_DIR/naive.tar" | grep -q 'shadow-like' || false
 }
 
 # ---------------------------------------------------------------------------
@@ -315,7 +315,7 @@ exec "$@"'
     # (a non-owner cannot rename a root-owned /tmp entry) needs a second uid: not run here
     # (audit p5a R5-02); the deploy checks it as real root.
     ! grep -nE '(chown|chmod)[^#]*"\$stage' "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh" \
-        | grep -v '"\$stage/\$name"'
+        | grep -v '"\$stage/\$name"' || false
     grep -qE 'chown [^#]*"\$stage/\$name"' "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh"
     # Dynamic (unprivileged, so we own the stage anyway): the last read swaps the stage for
     # a symlink, as a caller owning it could; the check right before tar refuses it.

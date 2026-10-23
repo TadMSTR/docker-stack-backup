@@ -17,6 +17,11 @@ Commands:
       Read and validate the stack's `x-backup` block (USAGE.md). Writes the per-stack
       x_backup record to FILE and prints the paths to exclude this run on stdout,
       NUL-terminated. An invalid block prints nothing: the stack is backed up in full.
+  retention <xbackup-file> <daily> <weekly> <monthly>
+      Print the stack's restic retention, "d w m": x-backup.retention key by key, else
+      the host defaults given.
+  restore-verified --file F --backend tar|restic --host H --version V --ref REF
+      Record a verified restore (tests/host/restore-drill.sh) in F, atomically.
 
 Everything this reads back from the backup share (the previous status.json) or from an
 operator file (the exemptions file) is data. It is parsed here, validated, and never
@@ -41,7 +46,13 @@ REASONS = (
     "no-compose-file", "no-appdata-reference", "appdata-missing", "appdata-empty",
     "not-running", "compose-ps-failed", "running-state-mismatch", "stop-failed",
     "archive-failed", "restart-failed", "interrupted",
+    # restic (0.8.0): the stack's restic backup failed, or restic could not be used this
+    # run at all (the same reason is then in restic.problem).
+    "restic-backup-failed", "restic-repo-missing", "restic-repo-locked",
+    "restic-password-wrong", "restic-repo-error", "restic-helper-failed",
+    "restic-helper-refused",
 )
+RESTIC_PROBLEMS = REASONS[REASONS.index("restic-repo-missing"):]
 MODES = ("running", "stopped")
 OUTCOMES = ("success", "partial", "failed", "aborted")
 ABORT_REASONS = (
@@ -65,6 +76,19 @@ FALLBACK_REASONS = (
     "check-failed", "create-failed",
 )
 PLATFORMS = ("debian", "truenas", "generic")
+BACKENDS = ("tar", "restic")
+BACKEND_RESULTS = ("ok", "failed")
+TAR_SCHEDULES = ("daily", "full")
+FORGET_RESULTS = ("ok", "failed", "refused")
+TASK_RESULTS = ("ok", "failed")
+RESTIC_TASKS = ("forget", "prune", "check")
+HEX64 = re.compile(r"[0-9a-f]{64}")
+RESTIC_SUMMARY_INTS = ("files_new", "files_changed", "files_unmodified", "data_added",
+                       "data_added_packed", "total_files_processed", "total_bytes_processed")
+RESTIC_STATS_INTS = ("total_size", "total_uncompressed_size", "snapshots_count",
+                     "total_blob_count")
+SUBSET_OK = re.compile(r"[0-9]{1,4}/[0-9]{1,4}|[0-9]{1,3}(\.[0-9]{1,2})?%")
+RESTIC_JSON_MAX = 64 * 1024 * 1024
 
 # x-backup limits (USAGE.md "Backup tiers").
 XB_LISTS = ("exclude", "weekly")
@@ -154,6 +178,14 @@ def cmd_record(argv):
     ap.add_argument("--snapshot-fallback", default="")
     ap.add_argument("--snapshot-s", default="")
     ap.add_argument("--snapshot-delete-failed", default="")
+    ap.add_argument("--tar-result", default="")
+    ap.add_argument("--restic-result", default="")
+    ap.add_argument("--restic-reason", default="")
+    ap.add_argument("--restic-summary", default="")
+    ap.add_argument("--restic-s", default="")
+    ap.add_argument("--forget-result", default="")
+    ap.add_argument("--forget-file", default="")
+    ap.add_argument("--retention", default="")
     opts = ap.parse_args(argv[10:])
     rec = {
         "name": clean(name),
@@ -167,6 +199,7 @@ def cmd_record(argv):
         "downtime_s": opt_int(downtime),
         "x_backup": None if opts.xbackup is None else read_xbackup_result(opts.xbackup),
         "snapshot": None,
+        "backends": record_backends(opts, archive, nbytes),
     }
     if opts.snapshot_backend in SNAPSHOT_BACKENDS and opts.snapshot_backend != "none":
         fb = opts.snapshot_fallback
@@ -181,6 +214,82 @@ def cmd_record(argv):
     with open(path, "a", encoding="ascii") as f:
         f.write(line)
     return 0
+
+
+def read_json_file(path, limit=RESTIC_JSON_MAX):
+    """A JSON document the run itself wrote (helper output in its private temp dir).
+    None if missing or unparsable."""
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as f:
+            data = f.read(limit + 1)
+        if len(data) > limit:
+            return None
+        return json.loads(data)
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def read_restic_summary(path):
+    """The `message_type: summary` line of restic backup --json (the last one)."""
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as f:
+            lines = f.read(RESTIC_JSON_MAX).splitlines()
+    except OSError:
+        return None
+    for raw in reversed(lines):
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(d, dict) and d.get("message_type") == "summary":
+            return d
+    return None
+
+
+def uint(v):
+    return v if type(v) is int and v >= 0 else None
+
+
+def record_backends(opts, archive, nbytes):
+    """Per-backend results for this stack: only the backends that ran for it."""
+    out = {}
+    if opts.tar_result in BACKEND_RESULTS:
+        out["tar"] = {"result": opts.tar_result, "archive": clean(archive) or None,
+                      "bytes": opt_int(nbytes)}
+    if opts.restic_result in BACKEND_RESULTS:
+        r = {"result": opts.restic_result, "reason": None, "snapshot_id": None,
+             "duration_s": opt_int(opts.restic_s), "forget": None}
+        for k in ("files_new", "files_changed", "files_unmodified", "data_added"):
+            r[k] = None
+        if opts.restic_result == "failed":
+            rr = opts.restic_reason
+            r["reason"] = rr if rr in REASONS else "restic-backup-failed"
+        summary = read_restic_summary(opts.restic_summary) if opts.restic_result == "ok" else None
+        if summary is not None:
+            sid = summary.get("snapshot_id")
+            r["snapshot_id"] = sid if isinstance(sid, str) and HEX64.fullmatch(sid) else None
+            for k in ("files_new", "files_changed", "files_unmodified", "data_added"):
+                r[k] = uint(summary.get(k))
+        if opts.forget_result in FORGET_RESULTS:
+            f = {"result": opts.forget_result, "retention": None, "kept": None, "removed": None}
+            parts = opts.retention.split()
+            if len(parts) == 3 and all(re.fullmatch(r"[0-9]{1,4}", x) for x in parts):
+                f["retention"] = dict(zip(XB_RETENTION_KEYS, (int(x) for x in parts)))
+            groups = read_json_file(opts.forget_file) if opts.forget_result == "ok" else None
+            if isinstance(groups, list):
+                kept = removed = 0
+                for g in groups:
+                    if isinstance(g, dict):
+                        kept += len(g.get("keep") or [])
+                        removed += len(g.get("remove") or [])
+                f["kept"], f["removed"] = kept, removed
+            r["forget"] = f
+        out["restic"] = r
+    return out or None
 
 
 def read_records(path):
@@ -496,6 +605,24 @@ def read_xbackup_result(path):
             "run_kind": None, "excluded": [], "stale": [], "retention": None}
 
 
+def cmd_retention(argv):
+    """`retention <xbackup-file> <d> <w> <m>`: the stack's x-backup.retention, key by
+    key, over the host defaults. Prints "d w m"."""
+    if len(argv) != 4 or not all(re.fullmatch(r"[0-9]{1,4}", x) for x in argv[1:]):
+        diag("retention: expected <xbackup-file> <daily> <weekly> <monthly>")
+        return 2
+    keep = dict(zip(XB_RETENTION_KEYS, (int(x) for x in argv[1:])))
+    doc = read_xbackup_result(argv[0])
+    r = doc.get("retention") if doc.get("status") == "ok" else None
+    if isinstance(r, dict):
+        for k in XB_RETENTION_KEYS:
+            v = r.get(k)
+            if type(v) is int and 0 <= v <= 1000:
+                keep[k] = v
+    print("%d %d %d" % (keep["daily"], keep["weekly"], keep["monthly"]))
+    return 0
+
+
 def cmd_xbackup(argv):
     ap = argparse.ArgumentParser(prog="dsb_status.py xbackup")
     ap.add_argument("--stack-path", required=True)
@@ -774,12 +901,11 @@ def valid_ts(v, now):
     return type(v) is int and TS_FLOOR <= v <= now + TS_SLACK
 
 
-def load_previous(path, host, now):
-    """(last_success or None, {stack: last_success}). Any doubt means "no previous
-    success": the file is never an error that stops the run, and no value from it
-    reaches anything but an integer range check."""
+def read_share_json(path, what, limit=PREV_MAX_BYTES):
+    """A JSON document from the backup share, or None. Any doubt means None, reported:
+    the file is never an error that stops the run."""
     if not path:
-        return None, {}
+        return None
     # Type check BEFORE open: open() on a device node runs the driver's open handler
     # (tape rewind, watchdog arming) before fstat could refuse it, and an NFS share
     # mounted without nodev resolves device nodes locally (audit F-02). Then fstat must
@@ -787,55 +913,69 @@ def load_previous(path, host, now):
     try:
         lst = os.lstat(path)
     except FileNotFoundError:
-        return None, {}
+        return None
     except OSError as e:
-        diag("previous status file ignored: cannot stat (%s)" % e.strerror)
-        return None, {}
+        diag("%s ignored: cannot stat (%s)" % (what, e.strerror))
+        return None
     if not stat.S_ISREG(lst.st_mode):
-        diag("previous status file ignored: not a regular file")
-        return None, {}
+        diag("%s ignored: not a regular file" % what)
+        return None
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
-        return None, {}
+        return None
     except OSError as e:
-        diag("previous status file ignored: cannot open (%s)" % e.strerror)
-        return None, {}
+        diag("%s ignored: cannot open (%s)" % (what, e.strerror))
+        return None
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (lst.st_dev, lst.st_ino):
-            diag("previous status file ignored: not a regular file, or replaced while opening")
-            return None, {}
-        if st.st_size > PREV_MAX_BYTES:
-            diag("previous status file ignored: larger than %d bytes" % PREV_MAX_BYTES)
-            return None, {}
+            diag("%s ignored: not a regular file, or replaced while opening" % what)
+            return None
+        if st.st_size > limit:
+            diag("%s ignored: larger than %d bytes" % (what, limit))
+            return None
         with os.fdopen(fd, "rb", closefd=False) as f:
-            data = f.read(PREV_MAX_BYTES + 1)
+            data = f.read(limit + 1)
     except OSError as e:
-        diag("previous status file ignored: cannot read (%s)" % e.strerror)
-        return None, {}
+        diag("%s ignored: cannot read (%s)" % (what, e.strerror))
+        return None
     finally:
         os.close(fd)
-    if len(data) > PREV_MAX_BYTES:
-        diag("previous status file ignored: larger than %d bytes" % PREV_MAX_BYTES)
-        return None, {}
+    if len(data) > limit:
+        diag("%s ignored: larger than %d bytes" % (what, limit))
+        return None
 
     def no_constants(name):
         raise ValueError("non-finite number")
 
     try:
-        doc = json.loads(data.decode("utf-8"), parse_constant=no_constants)
+        return json.loads(data.decode("utf-8"), parse_constant=no_constants)
     except Exception:  # UnicodeDecodeError, ValueError, RecursionError, …
-        diag("previous status file ignored: not valid UTF-8 JSON")
-        return None, {}
+        diag("%s ignored: not valid UTF-8 JSON" % what)
+        return None
+
+
+def read_previous(path, host):
+    """The previous status.json if it is ours (tool, schema, host), else None."""
+    doc = read_share_json(path, "previous status file")
+    if doc is None:
+        return None
     if not isinstance(doc, dict) or doc.get("tool") != TOOL \
             or type(doc.get("schema")) is not int or doc.get("schema") != SCHEMA:
         diag("previous status file ignored: not a schema %d %s status file" % (SCHEMA, TOOL))
-        return None, {}
+        return None
     if doc.get("host") != host:
         diag("previous status file ignored: written for another host")
-        return None, {}
+        return None
+    return doc
 
+
+def previous_success(doc, now):
+    """(last_success or None, {stack: last_success}) from a previous status doc. No value
+    from it reaches anything but an integer range check."""
+    if doc is None:
+        return None, {}
     last = doc.get("last_success")
     if last is not None and not valid_ts(last, now):
         diag("previous status file: last_success rejected (not an integer time in range)")
@@ -852,6 +992,33 @@ def load_previous(path, host, now):
     elif m is not None:
         diag("previous status file: stack_last_success rejected")
     return last, stacks
+
+
+def previous_times(doc, now):
+    """The carried last-success times added in 0.8.0: {"backend": {tar|restic: ts},
+    "restic": {forget|prune|check: ts}}. Each value an integer time in range, or absent."""
+    out = {"backend": {}, "restic": {}}
+    if doc is None:
+        return out
+    bl = doc.get("backend_last_success")
+    if isinstance(bl, dict):
+        for b in BACKENDS:
+            if valid_ts(bl.get(b), now):
+                out["backend"][b] = bl[b]
+    r = doc.get("restic")
+    if isinstance(r, dict):
+        for t in RESTIC_TASKS:
+            task = r.get(t)
+            if isinstance(task, dict) and valid_ts(task.get("last_success"), now):
+                out["restic"][t] = task["last_success"]
+    return out
+
+
+def load_previous(path, host, now):
+    """(last_success or None, {stack: last_success}). Any doubt means "no previous
+    success": the file is never an error that stops the run, and no value from it
+    reaches anything but an integer range check."""
+    return previous_success(read_previous(path, host), now)
 
 
 #######################################
@@ -1017,6 +1184,29 @@ def build_prom(doc):
             p.add("dsb_stack_xbackup_config_error",
                   "1 if the stack's x-backup block was rejected (backed up in full).", st,
                   1 if xb.get("status") == "config-error" else 0, merge="max")
+        be = s.get("backends")
+        if isinstance(be, dict):
+            for b in BACKENDS:
+                e = be.get(b)
+                if isinstance(e, dict) and e.get("result") in BACKEND_RESULTS:
+                    p.add("dsb_stack_backend_ok",
+                          "1 if the backend succeeded for the stack in the last run, 0 if it failed; absent if it did not run.",
+                          dict(st, backend=b), 1 if e["result"] == "ok" else 0, merge="min")
+            r = be.get("restic")
+            if isinstance(r, dict) and r.get("result") == "ok":
+                for state in ("new", "changed", "unmodified"):
+                    v = r.get("files_" + state)
+                    if type(v) is int:
+                        p.add("dsb_stack_restic_files",
+                              "Files in the stack's last restic snapshot: new, changed or unmodified since its parent.",
+                              dict(st, state=state), v)
+                if type(r.get("data_added")) is int:
+                    p.add("dsb_stack_restic_data_added_bytes",
+                          "Data the stack's last restic backup added to the repository (uncompressed).",
+                          st, r["data_added"])
+                if type(r.get("duration_s")) is int:
+                    p.add("dsb_stack_restic_duration_seconds",
+                          "Duration of the stack's last restic backup.", st, r["duration_s"], merge="max")
         snap = s.get("snapshot")
         if isinstance(snap, dict):
             p.add("dsb_stack_snapshot_used",
@@ -1035,6 +1225,50 @@ def build_prom(doc):
         p.add("dsb_snapshot_leftovers_swept",
               "Leftover snapshots from earlier runs that the last run's sweep removed.",
               h, sc.get("swept") or 0)
+    for b in doc.get("backends") or []:
+        if b not in BACKENDS:
+            continue
+        p.add("dsb_backend_enabled", "1 per backend configured (BACKENDS).", dict(h, backend=b), 1)
+        ran = doc.get("tar_ran") if b == "tar" else (doc.get("restic") or {}).get("ran")
+        p.add("dsb_backend_ran", "1 if the backend was scheduled in the last run.",
+              dict(h, backend=b), 1 if ran else 0)
+        p.add("dsb_backend_last_success_timestamp_seconds",
+              "Last run in which the backend ran and failed for no stack (Unix time), carried forward; 0 = never.",
+              dict(h, backend=b), (doc.get("backend_last_success") or {}).get(b) or 0)
+    rs = doc.get("restic")
+    if isinstance(rs, dict):
+        p.add("dsb_restic_repo_available",
+              "1 if the restic repository could be used in the last run (no restic.problem).",
+              h, 0 if rs.get("problem") else 1)
+        for t in RESTIC_TASKS:
+            task = rs.get(t) or {}
+            p.add("dsb_restic_task_last_success_timestamp_seconds",
+                  "Last successful restic forget/prune/check (Unix time), carried forward; 0 = never.",
+                  dict(h, task=t), task.get("last_success") or 0)
+            p.add("dsb_restic_task_failed", "1 if the restic task ran and failed in the last run.",
+                  dict(h, task=t), 1 if task.get("result") == "failed" else 0)
+        if isinstance(rs.get("orphan_stacks"), list):
+            p.add("dsb_restic_orphan_stacks",
+                  "Stacks with restic snapshots but no stack dir: their snapshots are never forgotten.",
+                  h, len(rs["orphan_stacks"]))
+        if type(rs.get("snapshots")) is int:
+            p.add("dsb_restic_snapshots", "Snapshots of this host in the restic repository.", h,
+                  rs["snapshots"])
+        st_ = rs.get("stats") or {}
+        if type(st_.get("total_size")) is int:
+            p.add("dsb_restic_repo_bytes", "restic repository size (raw data, after compression).", h,
+                  st_["total_size"])
+        if type(st_.get("total_uncompressed_size")) is int:
+            p.add("dsb_restic_repo_uncompressed_bytes",
+                  "restic repository size before compression.", h, st_["total_uncompressed_size"])
+    rv = doc.get("restore_verified")
+    if isinstance(rv, dict):
+        for b in BACKENDS:
+            e = rv.get(b)
+            if isinstance(e, dict) and type(e.get("time")) is int:
+                p.add("dsb_restore_verified_timestamp_seconds",
+                      "Last verified restore drill of the backend (Unix time), from restore-verified.json.",
+                      dict(h, backend=b), e["time"])
     for name, ts in sorted(doc["stack_last_success"].items()):
         p.add("dsb_stack_last_success_timestamp_seconds",
               "Last successful backup of the stack (Unix time), carried forward.",
@@ -1083,6 +1317,18 @@ def cmd_finalize(argv):
     ap.add_argument("--snapshot-note", default="")
     ap.add_argument("--snapshot-cleanup-failed", default="")
     ap.add_argument("--snapshot-swept", default="")
+    ap.add_argument("--backends", default="tar")
+    ap.add_argument("--tar-schedule", default="daily")
+    ap.add_argument("--tar-ran", default="")
+    ap.add_argument("--restic-ran", default="")
+    ap.add_argument("--restic-problem", default="")
+    ap.add_argument("--restic-repo-id", default="")
+    ap.add_argument("--restic-prune", default="")
+    ap.add_argument("--restic-check", default="")
+    ap.add_argument("--restic-check-subset", default="")
+    ap.add_argument("--restic-snapshots", default="")
+    ap.add_argument("--restic-stats", default="")
+    ap.add_argument("--restore-verified", default="")
     a = ap.parse_args(argv)
 
     now = int(time.time())
@@ -1093,7 +1339,9 @@ def cmd_finalize(argv):
     if aborted is not None and aborted not in ABORT_REASONS:
         aborted = "interrupted"
 
-    prev_last, prev_stacks = load_previous(a.status_file, host, now)
+    prev_doc = read_previous(a.status_file, host)
+    prev_last, prev_stacks = previous_success(prev_doc, now)
+    prev_times = previous_times(prev_doc, now)
 
     counts = {"found": len(recs), "backed_up": 0, "skipped": 0, "failed": 0}
     for r in recs:
@@ -1130,6 +1378,7 @@ def cmd_finalize(argv):
             "downtime_s": r.get("downtime_s"), "last_success": ls,
             "coverage": cov_by_name.get(r["name"]),
             "x_backup": r.get("x_backup"), "snapshot": r.get("snapshot"),
+            "backends": r.get("backends"),
         })
     xbackup_errors = sum(1 for s in stacks
                          if isinstance(s["x_backup"], dict) and s["x_backup"].get("status") == "config-error")
@@ -1140,6 +1389,10 @@ def cmd_finalize(argv):
             stack_last.setdefault(k, v)
 
     last_success = now if outcome == "success" else prev_last
+    backends = [b for b in a.backends.split() if b in BACKENDS] or ["tar"]
+    ran = {"tar": a.tar_ran == "true", "restic": a.restic_ran == "true"}
+    backend_last = run_backend_last(stacks, backends, ran, aborted, now, prev_times)
+    restic = run_restic(a, stacks, recs, aborted, now, prev_times) if "restic" in backends else None
     free = None
     if a.dest:
         try:
@@ -1161,6 +1414,12 @@ def cmd_finalize(argv):
         "snapshot_cleanup": ({"failed": opt_int(a.snapshot_cleanup_failed) or 0,
                               "swept": opt_int(a.snapshot_swept) or 0}
                              if a.snapshot_backend in ("btrfs", "zfs") else None),
+        "backends": backends,
+        "tar_schedule": a.tar_schedule if a.tar_schedule in TAR_SCHEDULES else None,
+        "tar_ran": ran["tar"],
+        "backend_last_success": backend_last,
+        "restic": restic,
+        "restore_verified": read_restore_verified(a.restore_verified, host, now),
         "counts": counts,
         "bytes_total": sum(s["bytes"] or 0 for s in stacks if s["result"] == "backed_up"),
         "dest": {"path": clean(a.dest), "free_bytes": free},
@@ -1212,6 +1471,196 @@ def cmd_finalize(argv):
     return rc
 
 
+def run_backend_last(stacks, backends, ran, aborted, now, prev_times):
+    """Per backend: now if it ran this run and failed for no stack (and the run was not
+    aborted), else carried forward from the previous status.json."""
+    out = {}
+    for b in backends:
+        last = prev_times["backend"].get(b)
+        if ran.get(b) and not aborted:
+            failed = any(isinstance(s.get("backends"), dict)
+                         and isinstance(s["backends"].get(b), dict)
+                         and s["backends"][b].get("result") == "failed" for s in stacks)
+            if not failed:
+                last = now
+        out[b] = last
+    return out
+
+
+def restic_task(result, last, now, extra=None):
+    doc = {"result": result, "last_success": now if result == "ok" else last}
+    if extra:
+        doc.update(extra)
+    return doc
+
+
+def orphan_stacks(snapshots, names):
+    """Stacks with dsb snapshots in the repository and no compose dir any more: their
+    snapshots are never forgotten (nothing forgets an absent tag). Reported, not deleted."""
+    if not isinstance(snapshots, list):
+        return None
+    seen = set()
+    for snap in snapshots:
+        tags = snap.get("tags") if isinstance(snap, dict) else None
+        if not isinstance(tags, list):
+            continue
+        for t in tags:
+            if isinstance(t, str) and t.startswith("stack:"):
+                n = t[len("stack:"):]
+                if LABEL_OK.fullmatch(n):
+                    seen.add(n)
+    return sorted(seen - set(names))
+
+
+def run_restic(a, stacks, recs, aborted, now, prev_times):
+    """The run-level restic record: repository, forget/prune/check with carried
+    last-success times, orphan stacks, stats."""
+    prev = prev_times["restic"]
+    problem = a.restic_problem if a.restic_problem in RESTIC_PROBLEMS else (
+        "restic-repo-error" if a.restic_problem else None)
+    # forget: every stack whose restic backup succeeded runs one; ok only if all did.
+    forgets = [s["backends"]["restic"]["forget"] for s in stacks
+               if isinstance(s.get("backends"), dict) and isinstance(s["backends"].get("restic"), dict)
+               and isinstance(s["backends"]["restic"].get("forget"), dict)]
+    if not forgets:
+        f_result = None
+    elif all(f.get("result") == "ok" for f in forgets):
+        f_result = "ok"
+    else:
+        f_result = "failed"
+    if aborted and f_result == "ok":
+        f_result = None   # an interrupted run did not forget for every stack
+    forget = restic_task(f_result, prev.get("forget"), now,
+                         {"stacks": len(forgets),
+                          "failed": sum(1 for f in forgets if f.get("result") != "ok")})
+    prune = restic_task(a.restic_prune if a.restic_prune in TASK_RESULTS else None,
+                        prev.get("prune"), now)
+    check = restic_task(a.restic_check if a.restic_check in TASK_RESULTS else None,
+                        prev.get("check"), now,
+                        {"subset": a.restic_check_subset
+                         if SUBSET_OK.fullmatch(a.restic_check_subset or "") else None})
+    snaps = None if aborted else read_json_file(a.restic_snapshots)
+    orphans = orphan_stacks(snaps, [r["name"] for r in recs]) if not aborted else None
+    stats_doc = None if aborted else read_json_file(a.restic_stats)
+    stats = None
+    if isinstance(stats_doc, dict):
+        stats = {k: uint(stats_doc.get(k)) for k in RESTIC_STATS_INTS}
+    repo_id = a.restic_repo_id if HEX64.fullmatch(a.restic_repo_id or "") else None
+    return {
+        "ran": a.restic_ran == "true",
+        "repo_id": repo_id,
+        "problem": problem,
+        "forget": forget, "prune": prune, "check": check,
+        "orphan_stacks": orphans,
+        "snapshots": len(snaps) if isinstance(snaps, list) else None,
+        "stats": stats,
+    }
+
+
+#######################################
+# restore-verified (tests/host/restore-drill.sh)
+#######################################
+RV_MAX_REF = 300
+RV_MAX_VERSION = 32
+
+
+def restore_verified_entries(doc, now):
+    """The valid per-backend entries of a restore-verified.json document."""
+    out = {}
+    if not isinstance(doc, dict):
+        return out
+    b = doc.get("backends")
+    if not isinstance(b, dict):
+        return out
+    for name in BACKENDS:
+        e = b.get(name)
+        if not isinstance(e, dict) or not valid_ts(e.get("time"), now):
+            continue
+        version = e.get("version")
+        ref = e.get("ref")
+        out[name] = {
+            "time": e["time"],
+            "version": printable(version)[:RV_MAX_VERSION] if isinstance(version, str) else None,
+            "ref": printable(ref)[:RV_MAX_REF] if isinstance(ref, str) else None,
+        }
+    return out
+
+
+# SECURITY[accepted]: anyone who can write the share can forge restore-verified.json and so
+# make dsb_restore_verified_timestamp_seconds show a fresh drill. The share is a root trust
+# boundary already (USAGE.md, vikunja#1100); this reader only bounds what such a file can
+# put into status.json. Do not read the metric as tamper-evident. Audit:
+# 2026-10-23/docker-stack-backup-2026-10-p5b-restic-backend (F-06).
+def read_restore_verified(path, host, now):
+    """restore-verified.json from the share: untrusted input, like the previous
+    status.json. Only well-formed entries are carried, each value bounded and printable."""
+    doc = read_share_json(path, "restore-verified file", limit=64 * 1024)
+    if doc is None:
+        return None
+    if not isinstance(doc, dict) or doc.get("tool") != TOOL or doc.get("host") != host:
+        diag("restore-verified file ignored: not ours, or written for another host")
+        return None
+    return restore_verified_entries(doc, now) or None
+
+
+def cmd_restic_snapshots(argv):
+    """`restic-snapshots <file>`: the helper's `snapshots` JSON as
+    stack<TAB>id<TAB>time<TAB>kind lines, newest first, for the restore wizard. The
+    repository is on the share: a tag or id that is not well-formed drops the snapshot."""
+    if len(argv) != 1:
+        diag("restic-snapshots: expected 1 argument")
+        return 2
+    doc = read_json_file(argv[0])
+    if not isinstance(doc, list):
+        diag("restic-snapshots: not a JSON list")
+        return 1
+    rows = []
+    for snap in doc:
+        if not isinstance(snap, dict):
+            continue
+        sid, t, tags = snap.get("id"), snap.get("time"), snap.get("tags")
+        if not (isinstance(sid, str) and HEX64.fullmatch(sid) and isinstance(t, str)
+                and isinstance(tags, list)):
+            continue
+        stacks = [x[6:] for x in tags if isinstance(x, str) and x.startswith("stack:")]
+        kinds = [x[5:] for x in tags if isinstance(x, str) and x.startswith("kind:")]
+        if len(stacks) != 1 or not LABEL_OK.fullmatch(stacks[0]) or stacks[0] in (".", ".."):
+            continue
+        kind = kinds[0] if len(kinds) == 1 and kinds[0] in RUN_KINDS else "?"
+        when = printable(t)[:19].replace("T", " ")
+        rows.append((t, stacks[0], sid, when, kind))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    for _, stack, sid, when, kind in rows:
+        print("%s\t%s\t%s\t%s" % (stack, sid, when, kind))
+    return 0
+
+
+def cmd_restore_verified(argv):
+    ap = argparse.ArgumentParser(prog="dsb_status.py restore-verified")
+    ap.add_argument("--file", required=True)
+    ap.add_argument("--backend", required=True, choices=BACKENDS)
+    ap.add_argument("--host", required=True)
+    ap.add_argument("--version", required=True)
+    ap.add_argument("--ref", required=True)
+    a = ap.parse_args(argv)
+    now = int(time.time())
+    host = clean(a.host)
+    prev = read_share_json(a.file, "restore-verified file", limit=64 * 1024)
+    entries = {}
+    if isinstance(prev, dict) and prev.get("tool") == TOOL and prev.get("host") == host:
+        entries = restore_verified_entries(prev, now)
+    entries[a.backend] = {"time": now, "version": printable(a.version)[:RV_MAX_VERSION],
+                          "ref": printable(a.ref)[:RV_MAX_REF]}
+    doc = {"schema": SCHEMA, "tool": TOOL, "host": host, "backends": entries}
+    data = (json.dumps(doc, indent=1, ensure_ascii=True) + "\n").encode("ascii")
+    try:
+        atomic_write(a.file, "%s.tmp.%d" % (a.file, os.getpid()), data)
+    except OSError as e:
+        diag("cannot write %s: %s" % (a.file, e.strerror))
+        return 1
+    return 0
+
+
 #######################################
 # coverage-report
 #######################################
@@ -1252,6 +1701,12 @@ def main():
         return cmd_xbackup(rest)
     if cmd == "xbackup-describe":
         return cmd_xbackup_describe(rest)
+    if cmd == "retention":
+        return cmd_retention(rest)
+    if cmd == "restore-verified":
+        return cmd_restore_verified(rest)
+    if cmd == "restic-snapshots":
+        return cmd_restic_snapshots(rest)
     diag("unknown command")
     return 2
 

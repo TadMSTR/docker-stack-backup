@@ -1,8 +1,9 @@
 #!/usr/bin/env bats
-# The declared-path rule exists in three places: dsb_status.py (xb_path_error, the
-# reader), lib.sh (valid_declared_path, before tar or the helper) and the root tar helper
-# (it trusts no caller). A root-owned helper cannot source the unprivileged lib, so the
-# rule is duplicated on purpose; this test is what keeps the three copies equal.
+# The declared-path rule exists in four places: dsb_status.py (xb_path_error, the
+# reader), lib.sh (valid_declared_path, before tar or the helpers), the root tar helper
+# and the root restic helper (they trust no caller). A root-owned helper cannot source
+# the unprivileged lib, so the rule is duplicated on purpose; this test is what keeps the
+# four copies equal.
 
 setup() {
     # A locale where bash's [A-Za-z] is NOT ASCII ('é' matches it there): each copy must
@@ -18,6 +19,13 @@ setup() {
     HELPER="$TEST_DIR/helper.sh"
     sed "s|^ALLOWED_APPDATA_PATH=.*|ALLOWED_APPDATA_PATH=\"$APPDATA\"|" \
         "$BATS_TEST_DIRNAME/../docker-backup-tar-create.sh" > "$HELPER"
+    # The restic helper, unprivileged and as RESTIC_RUN_AS: it checks every argument and
+    # then refuses with "backup needs root", so no restic binary is needed here.
+    RHELPER="$TEST_DIR/restic-helper.sh"
+    sed -e "s|^ALLOWED_APPDATA_PATH=.*|ALLOWED_APPDATA_PATH=\"$APPDATA\"|" \
+        -e "s|^RESTIC_HOST=.*|RESTIC_HOST=\"h\"|" \
+        -e "s|^RESTIC_RUN_AS=.*|RESTIC_RUN_AS=\"$(id -un)\"|" \
+        "$BATS_TEST_DIRNAME/../docker-backup-restic.sh" > "$RHELPER"
 }
 
 teardown() {
@@ -43,28 +51,39 @@ helper_ok() {
     bash "$HELPER" none "$TEMP_SRC" "$APPDATA" st -- "st/$1" > /dev/null 2>&1
 }
 
-@test "python, lib.sh and the root helper accept and refuse exactly the same paths" {
-    local p py lib hp long
+restic_ok() {
+    local out
+    out=$(bash "$RHELPER" backup "$TEMP_SRC" st 20261023_020001 daily -- "st/$1" 2>&1) && return 1
+    [[ "$out" == *"backup needs root"* ]]
+}
+
+@test "python, lib.sh and both root helpers accept and refuse exactly the same paths" {
+    # The restic helper copy runs as RESTIC_RUN_AS = the caller, which it refuses for root
+    # (CR-14): as root every path would read as refused.
+    [[ $EUID -ne 0 ]] || skip "the restic helper copy cannot run as root"
+    local p py lib hp rp long
     long=$(printf 'a%.0s' {1..255})
     for p in "${PATHS[@]}" "$long" "${long}b" "$long/x"; do
         python_ok "$p" && py=ok || py=refused
         lib_ok "$p" && lib=ok || lib=refused
         helper_ok "$p" && hp=ok || hp=refused
-        printf 'path=%q python=%s lib=%s helper=%s\n' "$p" "$py" "$lib" "$hp" >&3
+        restic_ok "$p" && rp=ok || rp=refused
+        printf 'path=%q python=%s lib=%s helper=%s restic=%s\n' "$p" "$py" "$lib" "$hp" "$rp" >&3
         [ "$py" = "$lib" ]
         [ "$py" = "$hp" ]
+        [ "$py" = "$rp" ]
     done
 }
 
 @test "a sample of the rule's verdicts (so equal-but-wrong copies would still fail)" {
     lib_ok models/blobs
     lib_ok .hidden
-    ! lib_ok ..
-    ! lib_ok a/../b
-    ! lib_ok /a
-    ! lib_ok -a
-    ! lib_ok 'a*'
-    ! lib_ok ''
+    ! lib_ok .. || false
+    ! lib_ok a/../b || false
+    ! lib_ok /a || false
+    ! lib_ok -a || false
+    ! lib_ok 'a*' || false
+    ! lib_ok '' || false
 }
 
 @test "the helper refuses a declared path for another stack, and '--' with nothing after it" {

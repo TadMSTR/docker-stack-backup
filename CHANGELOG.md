@@ -1,5 +1,95 @@
 # Changelog
 
+## [0.8.0] — 2026-10-23
+
+restic as a second backend, a schedulable tar set, per-stack retention, restore from
+restic through the existing wizard, owner-only archives (#1089) and a restore-verification
+age. Programme docker-stack-backup-2026-10 part 5b (vikunja#1086), from #494 Part 1. The
+defaults keep 0.7.0's behaviour: tar only, every run.
+
+### Added
+
+- **restic backend** (`BACKENDS=tar|restic|"tar restic"`, RESTIC.md). One restic
+  snapshot per stack, tagged `dsb`, `stack:<name>`, `kind:<daily|full>`, `run:<ts>`,
+  read from the same source as tar (the 0.7.0 snapshot, or the live dir while the stack
+  is stopped): **one stop per stack whatever the number of backends**. tar and restic
+  leave out exactly the same files (`x-backup` paths anchored, `EXCLUDE_PATTERNS`
+  unanchored in both; `tests/restic-e2e.bats` compares the member lists).
+- **`docker-backup-restic.sh`**, a third root helper (verbs `info`, `repo`, `init`,
+  `backup`, `forget`, `prune`, `check`, `snapshots`, `dump`, `stats`). Root-set constants
+  decide the binary, repository, password file, run-as user, host name and retention
+  floors. restic never runs as root: it runs as a dedicated user with
+  `CAP_DAC_READ_SEARCH` only, `no_new_privs`, `env -i`, and gets the password on stdin.
+  The backup runs in a private mount namespace that binds the stack onto a fixed dir, so
+  every snapshot records the same paths and restic's change detection works across fresh
+  btrfs/ZFS snapshots (`tests/restic-btrfs-real.bats`: every unchanged file `unmodified`).
+  See ELEVATION.md and SECURITY.md.
+- **`TAR_SCHEDULE=daily|full`**: `full` writes the tar set only on the full run, as the
+  weekly copy that needs neither the restic repository nor its password. For four weekly
+  sets, run cleanup with `RETENTION_DAYS=27 KEEP_MIN=4` (`tests/cleanup-weekly.bats`).
+- **Retention:** `x-backup.retention` (key by key over `RESTIC_KEEP_DAILY/WEEKLY/MONTHLY`,
+  default 7/4/6) is applied by `forget` after each stack's restic backup, scoped to the
+  host and the stack. Counts below the helper's floors (7 daily, 4 weekly) are refused,
+  never raised. `prune` and `check --read-data-subset` run on the full run
+  (`RESTIC_PRUNE_ON`/`RESTIC_CHECK_ON`); `RESTIC_CHECK_SUBSET=auto` rotates `n/12`, so
+  twelve checks read the whole repository.
+- **Restore from restic:** the wizard asks for the source (Step 0) when
+  `RESTIC_HELPER_PATH` is set, lists stacks and snapshots, and streams the helper's
+  `dump` into the same Steps 4-6. The dump has the tar archive's member layout.
+- **`tests/host/restore-drill.sh`**: the p3b drill, vendored and extended to both
+  backends, with `--probes` for the checks that need real root and two uids, `--check` for
+  CI, and `--record-dest` to write `restore-verified.json`.
+- **status.json** (schema 1, additive): run-level `backends`, `tar_schedule`, `tar_ran`,
+  `backend_last_success`, `restic` (`problem`, `forget`/`prune`/`check` with carried
+  `last_success`, `orphan_stacks`, `stats`), `restore_verified`; per stack `backends`
+  (each backend's result, restic's file counts, forget). New reasons
+  `restic-backup-failed`, `restic-repo-missing`, `restic-repo-locked`,
+  `restic-password-wrong`, `restic-repo-error`, `restic-helper-failed`,
+  `restic-helper-refused`.
+- **.prom:** `dsb_backend_enabled`, `dsb_backend_ran`,
+  `dsb_backend_last_success_timestamp_seconds`, `dsb_stack_backend_ok`,
+  `dsb_stack_restic_files`, `dsb_stack_restic_data_added_bytes`,
+  `dsb_stack_restic_duration_seconds`, `dsb_restic_repo_available`,
+  `dsb_restic_task_last_success_timestamp_seconds`, `dsb_restic_task_failed`,
+  `dsb_restic_orphan_stacks`, `dsb_restic_snapshots`, `dsb_restic_repo_bytes`,
+  `dsb_restic_repo_uncompressed_bytes`, `dsb_restore_verified_timestamp_seconds`.
+  STATUS.md has alerts for an unusable repository, stale forget/prune/check, a failed
+  check, a stale backend and a restore unverified for 35 days.
+
+### Changed
+
+- **#1089: archives are 0600 and new run dirs 0700** (`umask 077` in the backup and manual
+  scripts). Restore and verify, run as root, read the share **as its owner**, which also
+  works on an NFS export with root squash. The compose file and `.env` are copied with
+  their own modes (`cp -p`). Older archives keep 0664 until the one-time `chmod` in
+  RESTIC.md "Upgrading to 0.8.0".
+- A run whose restic forget, prune or check failed notifies as a failure and exits 1; the
+  stacks stay `backed_up`, and status.json says which task failed.
+- With restic enabled, an `EXCLUDE_PATTERNS` entry outside `A-Z a-z 0-9 . _ / * -` is a
+  config error (both root helpers refuse such a pattern).
+- Run header and dry run show the backends and what runs this run.
+- CI installs a pinned, sha256-checked restic 0.18.0 for the helper tests.
+
+### Security
+
+Fixes from the 0.8.0 pre-release audit (two rounds) and CodeRabbit review.
+
+- **The restic helper pins the stack directory it backs up (High, found before release).**
+  The live-dir backup used to check `ALLOWED_APPDATA_PATH/<stack>` by path and then
+  bind-mount it by path, and mount follows a symlink. A caller who could write the appdata
+  root could therefore swap a checked stack dir for a symlink and have restic, which can
+  read any file, back up another directory, then read it back through `dump`. The stack dir
+  must now be a plain directory at its canonical path, and the bound directory must be the
+  same inode as the one checked before restic runs.
+- Both root helpers refuse when `SUDO_UID` and `DOAS_USER` are both set (one of them came
+  from the caller's environment). This applies to the tar helper too.
+- `RESTIC_CHECK_SUBSET` is checked against restic's own limits at config time: `n/N` with
+  `1 <= n <= N <= 256`, `x%` above 0 and at most 100.
+- SECURITY.md and RESTIC.md now say exactly what the retention floors protect: the last
+  7 daily and 4 weekly snapshots. Monthlies are not protected while `FLOOR_MONTHLY=0`.
+- Tests: 78 negated assertions (`! cmd` not on a test's last line) could never fail a test.
+  All of them, across 19 files, now can.
+
 ## [0.7.0] — 2026-10-22
 
 Per-stack backup tiers, snapshot-assisted backup and platform profiles: the parts that

@@ -81,6 +81,11 @@ esac
 # dirs), made root archive any directory it pointed at into the caller's stdout (audit
 # p5a F-01). Who the caller is: sudo sets SUDO_UID and doas sets DOAS_USER, and neither
 # can be set by the caller through them; otherwise it is whoever runs this.
+# One elevation sets one of these. Both set means the caller supplied one through the
+# environment (doas keepenv, a root wrapper): refuse rather than pick (audit p5b F-04).
+if [[ -n "${SUDO_UID:-}" && -n "${DOAS_USER:-}" ]]; then
+    echo "docker-backup-tar-create: both SUDO_UID and DOAS_USER are set; cannot tell the invoking user" >&2; exit 2
+fi
 invoker_uid="$EUID"
 invoker_gid=$(id -g)
 if [[ -n "${SUDO_UID:-}" ]]; then

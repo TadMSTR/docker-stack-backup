@@ -159,7 +159,7 @@ STUB
     [[ "$output" == *"Not enough space on /stub"* ]]
     [[ "$output" == *"TMPDIR"* ]]
     [[ "$output" == *"RESTORE_SAFETY_DIR"* ]]
-    ! grep -q 'compose down' "$DOCKER_LOG"
+    ! grep -q 'compose down' "$DOCKER_LOG" || false
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
 }
 
@@ -170,7 +170,7 @@ STUB
     _drive_restore $'1\n1\n1\ny\n2\ny'
     [ "$status" -ne 0 ]
     [[ "$output" == *"Could not extract"*"nothing was changed"* ]]
-    ! grep -q 'compose down' "$DOCKER_LOG"
+    ! grep -q 'compose down' "$DOCKER_LOG" || false
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
     [ -z "$(ls -A "$TMPDIR")" ]
 }
@@ -192,7 +192,7 @@ STUB
     [ "$status" -eq 0 ]
     grep -q '^\[WARNING\] Stack directory already exists' "$LOG_FILE"
     grep -q '^\[SUCCESS\] Files restored successfully' "$LOG_FILE"
-    ! grep -q $'\033' "$LOG_FILE"
+    ! grep -q $'\033' "$LOG_FILE" || false
 }
 
 @test "safety dir that doesn't exist yet: space is checked on its future filesystem" {
@@ -213,7 +213,7 @@ STUB
     _drive_restore $'1\n1\n1\ny\n2\ny'
     [ "$status" -ne 0 ]
     [[ "$output" == *"Not enough space on /safetyfs"* ]]
-    ! grep -q 'compose down' "$DOCKER_LOG"
+    ! grep -q 'compose down' "$DOCKER_LOG" || false
     [ "$(cat "$APPDATA_PATH/web/data.txt")" = old-data ]
 }
 
@@ -252,7 +252,7 @@ STUB
     [[ "$output" == *"Not restoring compose.yaml: it is a symlink in the archive"* ]]
     # The secret was not copied in, and the old compose file was left alone.
     [ "$(cat "$STACK_DIR/compose.yaml")" = old-compose ]
-    ! grep -rq top-secret "$STACK_DIR" "$APPDATA_PATH"
+    ! grep -rq top-secret "$STACK_DIR" "$APPDATA_PATH" || false
     # .env replaced the destination symlink instead of writing through it.
     [ ! -L "$STACK_DIR/.env" ]
     [ "$(cat "$STACK_DIR/.env")" = NEW_ENV=1 ]
@@ -274,8 +274,8 @@ STUB
     [ "$status" -eq 1 ]
     [[ "$output" == *"Refusing stack name"* ]]
     grep -qF "[ERROR] Refusing stack name $(printf '%q' "$name")" "$LOG_FILE"
-    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
-    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE" || false
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output" || false
 }
 
 @test "log_* print the message as data: a literal \\n in a message stays one line (F-02)" {
@@ -292,7 +292,7 @@ STUB
     _drive_restore $'1\n1\n1'
     [ "$status" -eq 1 ]
     [[ "$output" == *'Refusing stack name we\ b'* ]]
-    ! grep -q 'compose down' "$DOCKER_LOG"
+    ! grep -q 'compose down' "$DOCKER_LOG" || false
 }
 
 @test "Step 4 flags setuid and device/pipe members before Proceed (audit p3a F-03)" {
@@ -336,11 +336,11 @@ STUB
 # printf %s passed them through, so the refusal message and the list lines could still
 # forge a root log line or drive the terminal (audit p3a round 2, R2-01).
 _assert_no_raw_control() {
-    ! grep -q $'\033' "$LOG_FILE"
-    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE"
-    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output"
+    ! grep -q $'\033' "$LOG_FILE" || false
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' "$LOG_FILE" || false
+    ! grep -q '^\[2026-10-14 03:00:00\] FORGED' <<< "$output" || false
     # The only ESC bytes on the terminal are our own colour codes.
-    ! grep -q $'\033\\[2J\\|\033\\]0;' <<< "$output"
+    ! grep -q $'\033\\[2J\\|\033\\]0;' <<< "$output" || false
 }
 
 @test "a stack archive name with a real LF and ESC: refused, no forged line, no raw ESC (R2-01)" {
@@ -392,7 +392,7 @@ _assert_no_raw_control() {
     _drive_restore $'1\n1\n1\nn'
     [ "$status" -eq 0 ]
     [[ "$output" == *"1 member(s) are setuid/setgid"* ]]
-    ! grep -q $'\033\\]0;\\|\033\\[2J\\|\033\\[1A' <<< "$output"
+    ! grep -q $'\033\\]0;\\|\033\\[2J\\|\033\\[1A' <<< "$output" || false
 }
 
 @test "printable replaces UTF-8 C1 controls in a C locale, keeps — and é (round 3 F-04)" {

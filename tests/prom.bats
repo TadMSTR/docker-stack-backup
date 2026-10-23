@@ -146,8 +146,8 @@ JSON
     run_backup
     [ "$status" -eq 0 ]
     _strict "$PROM"
-    ! grep -q "$TEST_DIR" "$PROM"
-    ! grep -q secretvol "$PROM"
+    ! grep -q "$TEST_DIR" "$PROM" || false
+    ! grep -q secretvol "$PROM" || false
     grep -qx "dsb_coverage_uncovered{host=\"$HOST\",stack=\"$STACK\"} 2" "$PROM"
 }
 

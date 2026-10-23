@@ -78,9 +78,9 @@ need_userns() {
     backup_archive helper
     members "$ARCHIVE" > "$TEST_DIR/helper.list"
     diff "$TEST_DIR/direct.list" "$TEST_DIR/helper.list"
-    ! grep -q "models/blobs/" "$TEST_DIR/helper.list"
-    ! grep -q "/idx/" "$TEST_DIR/helper.list"
-    ! grep -q "clamav/" "$TEST_DIR/helper.list"
+    ! grep -q "models/blobs/" "$TEST_DIR/helper.list" || false
+    ! grep -q "/idx/" "$TEST_DIR/helper.list" || false
+    ! grep -q "clamav/" "$TEST_DIR/helper.list" || false
 }
 
 @test "global EXCLUDE_PATTERNS match as on 0.6.0 (unanchored), with or without declared paths" {
@@ -100,9 +100,9 @@ CFG
     members "$TEST_DIR/ref.tar" > "$TEST_DIR/ref.list"
     members "$TEST_DIR/decl.tar" > "$TEST_DIR/decl.list"
     # The globals still match at any depth (unanchored): a/b and x/a/b are gone in both.
-    ! grep -q "/a/b/" "$TEST_DIR/ref.list"
-    ! grep -q "/x/a/b/" "$TEST_DIR/decl.list"
-    ! grep -q "clamav" "$TEST_DIR/decl.list"
+    ! grep -q "/a/b/" "$TEST_DIR/ref.list" || false
+    ! grep -q "/x/a/b/" "$TEST_DIR/decl.list" || false
+    ! grep -q "clamav" "$TEST_DIR/decl.list" || false
     # The declared path removed exactly models/blobs and nothing else.
     diff <(grep -v "^$STACK/models/blobs/" "$TEST_DIR/ref.list") "$TEST_DIR/decl.list"
     grep -q "^$STACK/models/blobs/" "$TEST_DIR/ref.list"
@@ -118,8 +118,8 @@ CFG
     # The order the code uses: the glob still matches.
     tar -c --exclude=clamav --anchored --no-wildcards --exclude="$STACK/a/b" \
         -C "$APPDATA_PATH" "$STACK" > "$d"
-    ! members "$d" | grep -q "clamav"
-    ! members "$d" | grep -q "^$STACK/a/b/"
+    ! members "$d" | grep -q "clamav" || false
+    ! members "$d" | grep -q "^$STACK/a/b/" || false
 }
 
 @test "daily run defers the weekly tier; a full run (--full) backs it up" {

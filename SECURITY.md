@@ -24,8 +24,13 @@ Include as much detail as possible: the affected component, steps to reproduce, 
 - The same via the snapshot helper (`docker-backup-snapshot.sh`): steering a snapshot
   create, delete, destroy or sweep at anything other than the `dsb-<stack>-<ts>`
   snapshots of the configured appdata root
+- The same via the restic helper (`docker-backup-restic.sh`, 0.8.0): reading a path,
+  repository or password other than its constants; running restic as root or with more
+  than `CAP_DAC_READ_SEARCH`; getting the repository password into argv, the environment
+  or a log; forgetting below the floors, or another stack's or host's snapshots; dumping
+  another stack's or host's snapshot
 - An `x-backup` declaration that leaves out more than the declared path, or that is
-  applied although it is invalid
+  applied although it is invalid, or that tar and restic apply differently
 - Dependency vulnerabilities with a plausible exploitation path in docker-stack-backup's usage
 
 **Out of scope:**
@@ -145,6 +150,42 @@ archive (or by the next run's sweep).
 `tests/snapshot-helper.bats` runs each negative probe first against a naive helper, to
 show the probe fires, and then against the real helper, which must refuse it without
 running btrfs or zfs.
+
+## Restic Helper
+
+`docker-backup-restic.sh` (0.8.0, optional) runs restic for the restic backend
+(RESTIC.md). Its trust boundary:
+
+- **No caller-supplied path, repository, password or restic flag.** The root-owned
+  constants decide the binary, repository, password file, run-as user, host name, cache
+  and stage dirs and the retention floors. The caller passes verbs, a stack name, the run
+  timestamp, the run kind, retention counts, the global exclude patterns and the declared
+  paths, each checked against a fixed shape (the declared paths by the same rule as the
+  other three copies).
+- **restic never runs as root** and never as the caller: it runs as `RESTIC_RUN_AS` with
+  `CAP_DAC_READ_SEARCH` as its only capability (effective, ambient and bounding), no
+  supplementary groups and `no_new_privs`, in a fixed environment (`env -i`).
+- **The password** is opened by root and handed to restic on stdin; it is never in argv,
+  the environment, or a path restic opens.
+- **Forget is bounded by the floors, and only by them**: it refuses counts below them
+  (default 7 daily, 4 weekly, 0 monthly), always filters by this host and the stack's tag,
+  and groups by host only. So the last 7 daily and 4 weekly snapshots of a stack cannot be
+  removed through the grant; **monthly snapshots can** (`forget <stack> 7 4 0`, then
+  `prune`), because the monthly floor is 0. Raise `FLOOR_MONTHLY` in the helper if the
+  monthlies must be protected too; a stack that then wants none cannot opt out.
+- **dump** only streams a snapshot whose id is one of this host's snapshots of the named
+  stack.
+- The backup runs in a private mount namespace; its tmpfs and read-only bind end with it.
+  The stack dir must be a plain directory at its canonical path, and the bound dir must be
+  the same inode as the one checked, so a dir swapped for a symlink in between is refused.
+  Read-only applies to the top bind; submounts under the stack dir keep their own flags
+  (restic holds no write capability).
+
+`tests/restic-helper.bats` runs each negative probe first against a naive `sudo restic`
+style invocation, to show it fires, then against the real helper. Two checks need two
+real uids: that another user cannot read restic's `/proc/<pid>/environ` or `fd/0`, or
+ptrace it. `tests/host/restore-drill.sh --probes` makes them as root (RESTIC.md "Verify as
+root").
 
 ## Response Expectations
 

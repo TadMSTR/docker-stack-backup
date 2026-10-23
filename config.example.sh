@@ -65,6 +65,24 @@ SNAPSHOT_HELPER_PATH=""           # e.g. /usr/local/sbin/docker-backup-snapshot.
 # forces a full run.
 FULL_RUN_DAY=7
 
+# Backends (USAGE.md "Backends", RESTIC.md): tar | restic | "tar restic". Default tar.
+BACKENDS="tar"
+# tar on every run (daily), or only on the full run (full: a weekly tar set beside daily
+# restic; needs both backends). For a weekly set, run cleanup with RETENTION_DAYS=27
+# KEEP_MIN=4.
+TAR_SCHEDULE="daily"
+# The root-owned restic helper. The repository, its password, the user restic runs as and
+# the binary are constants IN THE HELPER, never keys here.
+RESTIC_HELPER_PATH=""              # e.g. /usr/local/sbin/docker-backup-restic.sh
+# Host default retention; a stack overrides it key by key with x-backup.retention. The
+# helper refuses counts below its floors (7 daily, 4 weekly).
+RESTIC_KEEP_DAILY=7
+RESTIC_KEEP_WEEKLY=4
+RESTIC_KEEP_MONTHLY=6
+RESTIC_PRUNE_ON="full"             # full | daily | never
+RESTIC_CHECK_ON="full"             # full | daily | never
+RESTIC_CHECK_SUBSET="auto"         # auto (n/12, rotating: the whole repo every 12 checks) | n/N | x%
+
 # Stacks that have appdata but no running containers.
 # true (default): archive them as they are — nothing is stopped or started.
 # false: skip them; they are reported as skipped with reason "not-running".

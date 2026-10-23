@@ -9,7 +9,7 @@
 
 # Release version, logged in every run header and included in notifications.
 # shellcheck disable=SC2034  # used in sourcing scripts
-DSB_VERSION="0.7.0"
+DSB_VERSION="0.8.0"
 
 #######################################
 # OS Detection
@@ -295,6 +295,200 @@ resolve_run_kind() {
     else
         echo daily
     fi
+}
+
+#######################################
+# Backends (USAGE.md "Backends", RESTIC.md)
+# BACKENDS: "tar", "restic" or "tar restic" (a space-separated string). TAR_SCHEDULE:
+# daily (every run) or full (only on a full run, resolve_run_kind). restic, when enabled,
+# runs on every run. Defaults keep 0.7.0's behaviour: tar only, every run.
+# The restic repository, its password, the user it runs as and the binary are constants
+# of the root helper (RESTIC_HELPER_PATH), never config.sh keys: config.sh is writable by
+# the backup user, and on some hosts tracked in git.
+#######################################
+BACKENDS="${BACKENDS:-tar}"
+TAR_SCHEDULE="${TAR_SCHEDULE:-daily}"
+RESTIC_HELPER_PATH="${RESTIC_HELPER_PATH:-}"
+RESTIC_KEEP_DAILY="${RESTIC_KEEP_DAILY:-7}"
+RESTIC_KEEP_WEEKLY="${RESTIC_KEEP_WEEKLY:-4}"
+RESTIC_KEEP_MONTHLY="${RESTIC_KEEP_MONTHLY:-6}"
+# full | daily | never: on which runs prune and check run (after every stack).
+RESTIC_PRUNE_ON="${RESTIC_PRUNE_ON:-full}"
+RESTIC_CHECK_ON="${RESTIC_CHECK_ON:-full}"
+# auto (rotating n/12, see restic_check_subset), n/N, or x% (restic --read-data-subset).
+RESTIC_CHECK_SUBSET="${RESTIC_CHECK_SUBSET:-auto}"
+RESTIC_CHECK_PARTS=12
+
+# backend_enabled <tar|restic>
+backend_enabled() {
+    [[ " $BACKENDS " == *" $1 "* ]]
+}
+
+# tar_scheduled <run_kind> — tar runs on this run.
+tar_scheduled() {
+    backend_enabled tar && { [[ "$TAR_SCHEDULE" == daily ]] || [[ "$1" == full ]]; }
+}
+
+# schedule_due <full|daily|never> <run_kind>
+schedule_due() {
+    case "$1" in
+        daily) return 0 ;;
+        full)  [[ "$2" == full ]] ;;
+        *)     return 1 ;;
+    esac
+}
+
+# Logs and returns 1 for any invalid backend setting. Run before anything is stopped.
+validate_backends() {
+    local ok=0 b seen=" "
+    local -a words=()
+    read -r -a words <<< "${BACKENDS:-}"
+    if [[ ${#words[@]} -eq 0 ]]; then
+        log_error "BACKENDS must name tar, restic or both (got: '$(printable "${BACKENDS:-}")')"
+        return 1
+    fi
+    for b in "${words[@]}"; do
+        if [[ "$b" != tar && "$b" != restic ]] || [[ "$seen" == *" $b "* ]]; then
+            log_error "BACKENDS must be tar, restic or \"tar restic\" (got: '$(printable "$BACKENDS")')"
+            return 1
+        fi
+        seen+="$b "
+    done
+    BACKENDS="${seen# }"; BACKENDS="${BACKENDS% }"
+    case "${TAR_SCHEDULE:-}" in
+        daily) ;;
+        full)
+            if ! backend_enabled tar; then
+                log_error "TAR_SCHEDULE=full needs tar in BACKENDS"
+                ok=1
+            elif ! backend_enabled restic; then
+                # Daily runs would then back up nothing at all.
+                log_error "TAR_SCHEDULE=full needs restic in BACKENDS too: daily runs would back up nothing"
+                ok=1
+            fi
+            ;;
+        *) log_error "TAR_SCHEDULE must be daily or full (got: '$(printable "${TAR_SCHEDULE:-}")')"; ok=1 ;;
+    esac
+    if backend_enabled restic; then
+        if [[ -z "${RESTIC_HELPER_PATH:-}" ]]; then
+            log_error "BACKENDS includes restic but RESTIC_HELPER_PATH is not set (RESTIC.md)"
+            ok=1
+        elif [[ ! -f "$RESTIC_HELPER_PATH" ]]; then
+            log_error "RESTIC_HELPER_PATH not found: $(printable "$RESTIC_HELPER_PATH")"
+            ok=1
+        fi
+        validate_uint RESTIC_KEEP_DAILY 0 1000 || ok=1
+        validate_uint RESTIC_KEEP_WEEKLY 0 1000 || ok=1
+        validate_uint RESTIC_KEEP_MONTHLY 0 1000 || ok=1
+        local key
+        for key in RESTIC_PRUNE_ON RESTIC_CHECK_ON; do
+            case "${!key:-}" in
+                full|daily|never) ;;
+                *) log_error "$key must be full, daily or never (got: '$(printable "${!key:-}")')"; ok=1 ;;
+            esac
+        done
+        local LC_ALL=C pattern
+        # The helpers' rule for a global exclude: one that restic's helper would refuse
+        # would fail every stack's restic backup, so stop here instead.
+        for pattern in "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}"; do
+            if [[ ! "$pattern" =~ ^[A-Za-z0-9._/*-]+$ || "$pattern" == -* ]]; then
+                log_error "EXCLUDE_PATTERNS entry '$(printable "$pattern")' is not allowed with restic: only A-Z a-z 0-9 . _ / * - (one pattern per array entry)"
+                ok=1
+            fi
+        done
+        # restic's own range rule (0.18 checkFlags), as the helper applies it, so a bad value
+        # stops the run here and not at every full run's check: n/N with 1 <= n <= N <= 256,
+        # or x% above 0 and at most 100 (audit p5b CR-02, R2-01).
+        local subset="${RESTIC_CHECK_SUBSET:-}" subset_ok=false
+        if [[ "$subset" == auto ]]; then
+            subset_ok=true
+        elif [[ "$subset" =~ ^([0-9]{1,4})/([0-9]{1,4})$ ]]; then
+            (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 10#${BASH_REMATCH[2]} \
+               && 10#${BASH_REMATCH[2]} <= 256 )) && subset_ok=true
+        elif [[ "$subset" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?%$ ]]; then
+            local whole=$((10#${BASH_REMATCH[1]})) frac="${BASH_REMATCH[3]:-0}"
+            if { (( whole > 0 )) || [[ ! "$frac" =~ ^0+$ ]]; } \
+               && { (( whole < 100 )) || { (( whole == 100 )) && [[ "$frac" =~ ^0+$ ]]; }; }; then
+                subset_ok=true
+            fi
+        fi
+        if [[ "$subset_ok" != true ]]; then
+            log_error "RESTIC_CHECK_SUBSET must be auto, n/N (1 <= n <= N <= 256) or x% (above 0, at most 100) (got: '$(printable "$subset")')"
+            ok=1
+        fi
+    fi
+    return $ok
+}
+
+# restic_check_subset <full|daily> — the --read-data-subset for this run's check. auto:
+# n/12 with n rotating once per check period (a week when checks run on full runs, a
+# day when daily), counted from the Unix epoch, so twelve consecutive checks read every
+# pack once whatever the run day (USAGE.md "restic check").
+restic_check_subset() {
+    if [[ "$RESTIC_CHECK_SUBSET" != auto ]]; then
+        echo "$RESTIC_CHECK_SUBSET"
+        return
+    fi
+    local period=604800
+    [[ "$RESTIC_CHECK_ON" == daily ]] && period=86400
+    echo "$(( $(date +%s) / period % RESTIC_CHECK_PARTS + 1 ))/$RESTIC_CHECK_PARTS"
+}
+
+# restic_helper <verb> [args...] — the root-owned docker-backup-restic.sh, through
+# ELEVATION_CMD, or directly when already root (ELEVATION_CMD=none). As snapshot_helper.
+restic_helper() {
+    case "${ELEVATION_CMD:-none}" in
+        # Already root: the helper must see root as its invoker, not a SUDO_UID left in
+        # the environment by `sudo -i` or a wrapper (it would refuse root's temp dir).
+        none)      env -u SUDO_UID -u SUDO_GID -u SUDO_USER -u DOAS_USER "$RESTIC_HELPER_PATH" "$@" ;;
+        sudo|doas) "$ELEVATION_CMD" "$RESTIC_HELPER_PATH" "$@" ;;
+        *) log_error "Unsupported ELEVATION_CMD: '$(printable "${ELEVATION_CMD:-}")' (expected: none | sudo | doas)"; return 2 ;;
+    esac
+}
+
+# restic_problem_for_rc <exit code> — the run-level reason for a restic helper failure.
+restic_problem_for_rc() {
+    case "$1" in
+        10) echo restic-repo-missing ;;
+        11) echo restic-repo-locked ;;
+        12) echo restic-password-wrong ;;
+        2)  echo restic-helper-refused ;;
+        *)  echo restic-repo-error ;;
+    esac
+}
+
+#######################################
+# Reading the backup share as its owner (#1089)
+# Archives are written 0600 and run dirs 0700, so on an NFS export with root squash,
+# root (squashed to nobody) can read neither. Restore and verify, which run as root, read
+# the share AS THE OWNER of what they read: `as_owner_of <path> <cmd...>` runs cmd with
+# the uid/gid that own <path> (setpriv, no supplementary groups, no new privileges) when
+# root and the owner is not root, and as is otherwise. Only the read runs as the owner;
+# extracting still runs as root, so restored files keep their recorded owners.
+#######################################
+as_owner_of() {
+    local path="$1"; shift
+    if [[ $EUID -ne 0 ]]; then
+        "$@"
+        return
+    fi
+    local owner
+    owner=$(stat -c '%u:%g' -- "$path" 2>/dev/null) || owner=""
+    if [[ ! "$owner" =~ ^[0-9]+:[0-9]+$ ]]; then
+        log_error "Cannot stat $(printable "$path") to read it as its owner"
+        return 1
+    fi
+    if [[ "${owner%%:*}" == 0 ]]; then
+        "$@"
+        return
+    fi
+    setpriv --reuid="${owner%%:*}" --regid="${owner##*:}" --clear-groups --no-new-privs -- "$@"
+}
+
+# share_dir_readable <owner_path> <dir> — <dir> can be listed as <owner_path>'s owner. The
+# listings run with stderr discarded, so without this an unreadable dir would look empty.
+share_dir_readable() {
+    as_owner_of "$1" test -d "$2" -a -r "$2" -a -x "$2" 2>/dev/null
 }
 
 #######################################
@@ -1193,12 +1387,11 @@ standard_layout() {
 # interrupted or failed archive is never mistaken for a backup.
 #   $1 = final archive path (ending in get_compression_extension), rest = tar args
 #######################################
-# SECURITY[deferred]: archives (and the .incomplete file) take the process umask, so on
-# the backup share they are world-readable (0664) although they hold full appdata. The
-# fix (umask 077) waits on a restore/verify read path that works when root is squashed
-# on an NFS destination. Target: docker-stack-backup-2026-10 p5 (moved from p3c by the
-# programme ledger: it needs the atlas export's root mapping). Ticket #1089 (id 1172).
-# Audit: 2026-10-13/docker-stack-backup-2026-10-p1-correctness (F-04).
+# Archives (and the .incomplete file) take the process umask: the backup and manual
+# scripts set umask 077 (0.8.0, #1089), so archives are 0600 and run dirs 0700. Restore
+# and verify read them as their owner (as_owner_of), which also works when root is
+# squashed on an NFS destination. Archives written before 0.8.0 keep their 0664 until the
+# one-time chmod in RESTIC.md "Upgrading to 0.8.0".
 create_archive_atomic() {
     local final_file="$1"; shift
     local ext; ext=$(get_compression_extension)

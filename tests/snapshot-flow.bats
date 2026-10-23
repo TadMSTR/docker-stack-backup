@@ -121,7 +121,7 @@ snapshots_left() {
     [ "$status" -eq 0 ]
     [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
     [ "$(grep -c '^compose start' "$DOCKER_LOG")" -eq 1 ]
-    ! grep -q -- '--from-snapshot' "$DOCKER_LOG"
+    ! grep -q -- '--from-snapshot' "$DOCKER_LOG" || false
     # The archive came before the start: the old order.
     run flow
     local i archive_at start_at
@@ -142,8 +142,8 @@ snapshots_left() {
     echo "$APPDATA_PATH/$STACK/db ext4" > "$SNAP_T/mounts"
     run_backup
     [ "$status" -eq 0 ]
-    ! grep -q "create $STACK" "$DOCKER_LOG"
-    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    ! grep -q "create $STACK" "$DOCKER_LOG" || false
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG" || false
     [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["fallback_reason"]')" = '"mountpoint"' ]
     [[ "$output" == *"No snapshot for $STACK (mountpoint)"* ]]
@@ -163,7 +163,7 @@ STUB
     run_backup
     [ "$status" -eq 0 ]
     grep -q "check $STACK" "$DOCKER_LOG"
-    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG" || false
     [ "$(grep -c '^compose stop' "$DOCKER_LOG")" -eq 1 ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["fallback_reason"]')" = '"mountpoint"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["result"]')" = '"backed_up"' ]
@@ -184,7 +184,7 @@ STUB
     mv "$APPDATA_PATH/$STACK" "$APPDATA_PATH/real"
     ln -s real "$APPDATA_PATH/$STACK"
     run_backup
-    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["fallback_reason"]')" = '"check-failed"' ]
 }
 
@@ -226,7 +226,7 @@ STUB
 @test "an unsupported ELEVATION_CMD never reaches the snapshot helper" {
     export ELEVATION_CMD=pkexec
     run_backup
-    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG" || false
 }
 
 @test "two signals during the archive: exit at once, and the snapshot is still deleted" {
@@ -288,7 +288,7 @@ STUB
     export STUB_STOP_RC=1
     run_backup
     [ "$status" -eq 1 ]
-    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["stacks"][0]["reason"]')" = '"stop-failed"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["used"]')" = false ]
     grep -qx "dsb_stack_snapshot_used{host=\"$HOST\",stack=\"$STACK\"} 0" "$PROM"
@@ -298,8 +298,8 @@ STUB
     : > "$STATE_FILE"
     run_backup
     [ "$status" -eq 0 ]
-    ! grep -q "check $STACK" "$DOCKER_LOG"
-    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG"
+    ! grep -q "check $STACK" "$DOCKER_LOG" || false
+    ! grep -q '^btrfs subvolume snapshot' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["stacks"][0]["mode"]')" = '"stopped"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["used"]')" = false ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]["fallback_reason"]')" = null ]
@@ -341,7 +341,7 @@ STUB
     [ "$(js "$STATUS" 'd["snapshot_note"]')" = '"btrfs: SNAPSHOT_HELPER_PATH is not set"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]')" = null ]
     [[ "$output" == *"Snapshots not used (btrfs: SNAPSHOT_HELPER_PATH is not set)"* ]]
-    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG" || false
 }
 
 @test "SNAPSHOT_BACKEND=auto on a filesystem with no snapshots: none" {
@@ -356,10 +356,10 @@ STUB
     unset SNAPSHOT_BACKEND SNAPSHOT_HELPER_PATH
     run_backup
     [ "$status" -eq 0 ]
-    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-snapshot' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["snapshot_backend"]')" = '"none"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["snapshot"]')" = null ]
-    ! grep -q '^dsb_snapshot_fallbacks' "$PROM"
+    ! grep -q '^dsb_snapshot_fallbacks' "$PROM" || false
 }
 
 @test "a backend from the debian profile behaves like auto: no helper means none, not a failure" {
@@ -386,6 +386,6 @@ STUB
     [ "$status" -eq 0 ]
     [[ "$output" == *"Snapshot backend: btrfs"* ]]
     [[ "$output" == *"snapshot: btrfs (stopped only while the snapshot is taken)"* ]]
-    ! grep -qE '^btrfs subvolume (snapshot|delete)' "$DOCKER_LOG"
-    ! grep -q '^compose stop' "$DOCKER_LOG"
+    ! grep -qE '^btrfs subvolume (snapshot|delete)' "$DOCKER_LOG" || false
+    ! grep -q '^compose stop' "$DOCKER_LOG" || false
 }

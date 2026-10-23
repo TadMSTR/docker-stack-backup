@@ -251,7 +251,7 @@ _assert_aborted() {
     [[ "$output" == *"Another backup is already running"* ]]
     exec 9>&-
     cmp "$STATUS" "$TEST_DIR/before.json"
-    ! grep -q '^CONFIG: url' "$CURL_LOG"
+    ! grep -q '^CONFIG: url' "$CURL_LOG" || false
 }
 
 @test "an abort before the lock does not touch status while another run holds the lock" {
