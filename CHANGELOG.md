@@ -70,6 +70,26 @@ defaults keep 0.7.0's behaviour: tar only, every run.
 - Run header and dry run show the backends and what runs this run.
 - CI installs a pinned, sha256-checked restic 0.18.0 for the helper tests.
 
+### Security
+
+Fixes from the 0.8.0 pre-release audit (two rounds) and CodeRabbit review.
+
+- **The restic helper pins the stack directory it backs up (High, found before release).**
+  The live-dir backup used to check `ALLOWED_APPDATA_PATH/<stack>` by path and then
+  bind-mount it by path, and mount follows a symlink. A caller who could write the appdata
+  root could therefore swap a checked stack dir for a symlink and have restic, which can
+  read any file, back up another directory, then read it back through `dump`. The stack dir
+  must now be a plain directory at its canonical path, and the bound directory must be the
+  same inode as the one checked before restic runs.
+- Both root helpers refuse when `SUDO_UID` and `DOAS_USER` are both set (one of them came
+  from the caller's environment). This applies to the tar helper too.
+- `RESTIC_CHECK_SUBSET` is checked against restic's own limits at config time: `n/N` with
+  `1 <= n <= N <= 256`, `x%` above 0 and at most 100.
+- SECURITY.md and RESTIC.md now say exactly what the retention floors protect: the last
+  7 daily and 4 weekly snapshots. Monthlies are not protected while `FLOOR_MONTHLY=0`.
+- Tests: 78 negated assertions (`! cmd` not on a test's last line) could never fail a test.
+  All of them, across 19 files, now can.
+
 ## [0.7.0] — 2026-10-22
 
 Per-stack backup tiers, snapshot-assisted backup and platform profiles: the parts that
