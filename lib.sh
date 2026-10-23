@@ -469,6 +469,12 @@ as_owner_of() {
     setpriv --reuid="${owner%%:*}" --regid="${owner##*:}" --clear-groups --no-new-privs -- "$@"
 }
 
+# share_dir_readable <owner_path> <dir> — <dir> can be listed as <owner_path>'s owner. The
+# listings run with stderr discarded, so without this an unreadable dir would look empty.
+share_dir_readable() {
+    as_owner_of "$1" test -d "$2" -a -r "$2" -a -x "$2" 2>/dev/null
+}
+
 #######################################
 # Platform profiles
 # PLATFORM=auto|debian|truenas. A profile sets defaults only: a value set in config.sh

@@ -74,6 +74,8 @@ hsize() {
 
 hosts() {
     local -a h=()
+    share_dir_readable "$BACKUP_BASE" "$BACKUP_BASE" \
+        || printf '%b✗ cannot read %s as its owner%b\n' "$RED" "$(printable "$BACKUP_BASE")" "$NC" >&2
     mapfile -d '' -t h < <(names "$BACKUP_BASE" "$BACKUP_BASE" -type d)
     printf '%s\0' "${h[@]+"${h[@]}"}"
 }
@@ -138,6 +140,20 @@ verify_backups() {
         fi
         
         printf '%bVerifying: %s%b\n' "$GREEN" "$(printable "$hostname")" "$NC"
+        # An unreadable host or run dir is a failure, never an empty one (SH-15).
+        local -a unreadable=()
+        mapfile -d '' -t unreadable < <(
+            share_dir_readable "$host_dir" "$host_dir" || printf '%s\0' "$host_dir"
+            local r
+            while IFS= read -r -d '' r; do
+                share_dir_readable "$host_dir" "$host_dir/$r" || printf '%s\0' "$host_dir/$r"
+            done < <(names "$host_dir" "$host_dir" -type d))
+        local u
+        for u in "${unreadable[@]+"${unreadable[@]}"}"; do
+            printf '  %b✗%b cannot read %s as its owner\n' "$RED" "$NC" "$(printable "${u#"$BACKUP_BASE"/}")"
+            total_checked=$((total_checked + 1))
+            total_invalid=$((total_invalid + 1))
+        done
         
         local -a archives=()
         mapfile -d '' -t archives < <(as_owner_of "$host_dir" find "$host_dir" -mindepth 2 -maxdepth 2 \

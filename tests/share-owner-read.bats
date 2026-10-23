@@ -71,7 +71,10 @@ STUB
 }
 
 teardown() {
-    rm -rf "${TEST_DIR:?}"
+    # setup may have skipped before TEST_DIR was set: a failing teardown makes bats drop
+    # the tests from its count instead of reporting them skipped.
+    [[ -n "${TEST_DIR:-}" ]] || return 0
+    rm -rf -- "$TEST_DIR"
 }
 
 # restore_steps <script dir> — Steps 1-6 as namespace root, answers 1,1,1,y,1,y,n.

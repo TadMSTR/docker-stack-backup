@@ -388,7 +388,9 @@ mount -o remount,bind,ro,nosuid,nodev -- "$dir/$stack"
 cd -- "$dir"
 exec "$@"'
         rc=0
-        unshare --mount --propagation private -- bash -c "$ns_script" _ \
+        # env -i: nothing of the caller's environment (BASH_ENV, SHELLOPTS, …) reaches the
+        # root shell that runs the namespace script.
+        unshare --mount --propagation private -- env -i PATH="$PATH" LC_ALL=C bash -c "$ns_script" _ \
             "$RESTIC_STAGE_DIR" "$stage" "$source_root" "$stack" \
             "${DROP[@]}" env -i "${RESTIC_ENV[@]}" "$RESTIC_BIN" --repo "$RESTIC_REPO" \
             backup --json --quiet --host "$RESTIC_HOST" --group-by host,paths \

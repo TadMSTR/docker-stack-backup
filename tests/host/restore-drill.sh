@@ -115,9 +115,15 @@ if [[ ${#problems[@]} -gt 0 ]]; then
     exit 1
 fi
 docker image inspect alpine:3 >/dev/null 2>&1 || { echo "image alpine:3 is not present (the drill never pulls)"; exit 1; }
-[[ ! -e $D ]] || { echo "$D already exists — not running"; exit 1; }
 [[ -z "$(docker ps -aq --filter label=com.docker.compose.project=dsb-drill)" ]] || { echo "project dsb-drill already exists"; exit 1; }
 
+# /tmp is shared: create the scratch root in one step that fails if anything (a dir, a
+# file, a planted symlink) is already there, then check it is root's own directory. A
+# `[[ ! -e ]]` test followed by `mkdir -p` left a window in which another user could plant
+# a symlink there, and root would then write (and source) the scratch config.sh through it.
+mkdir -m 0700 -- "$D" 2>/dev/null || { echo "$D already exists (or cannot be created) — not running"; exit 1; }
+[[ -d "$D" && ! -L "$D" && "$(stat -c %u -- "$D")" == 0 ]] || { echo "$D is not root's own directory — not running"; exit 1; }
+chmod 0755 -- "$D"   # RESTIC_RUN_AS must traverse it to reach the scratch repository
 mkdir -p "$OUT" "$D/tmp" "$D/run" "$D/stacks/dsb-drill" "$A" "$D/backups" "$D/safety" "$S"
 export TMPDIR=$D/tmp
 unset BACKUP_BASE

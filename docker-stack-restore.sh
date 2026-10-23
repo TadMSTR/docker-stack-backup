@@ -258,6 +258,10 @@ select_hostname() {
     
     # Read as the share's owner (#1089); sorted, as the glob was.
     selected_hostname=""
+    if ! share_dir_readable "$BACKUP_BASE" "$BACKUP_BASE"; then
+        log_error "Cannot read $BACKUP_BASE as its owner"
+        exit 1
+    fi
     mapfile -d '' -t hostnames < <(share_list "$BACKUP_BASE" -type d | sort -z)
     
     if [[ ${#hostnames[@]} -eq 0 ]]; then
@@ -299,6 +303,10 @@ select_timestamp() {
     # count below ("timestamps: unbound variable"). The wizard never got past this step
     # (#1094).
     # As the share's owner (#1089): run dirs are 0700 since 0.8.0.
+    if ! share_dir_readable "$(share_owner_path)" "$host_dir"; then
+        log_error "Cannot read $host_dir as its owner"
+        exit 1
+    fi
     mapfile -d '' -t timestamps < <(share_list "$host_dir" -type d | sort -z -r)
     
     if [[ ${#timestamps[@]} -eq 0 ]]; then
@@ -350,6 +358,10 @@ select_stack() {
     # Listed as the share's owner (#1089), sorted, as the glob was.
     local -a sizes=()
     local -a entries=()
+    if ! share_dir_readable "$(share_owner_path)" "$backup_dir"; then
+        log_error "Cannot read $backup_dir as its owner"
+        exit 1
+    fi
     mapfile -d '' -t entries < <(as_owner_of "$(share_owner_path)" find "$backup_dir" -mindepth 1 -maxdepth 1 \
         -type f ! -name '.*' -printf '%s %f\0' 2>/dev/null | sort -z -k2)
     local ext entry fname
