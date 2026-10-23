@@ -58,7 +58,7 @@ the namespace.
 **Why the fixed directory.** restic chooses the parent snapshot, against which it detects
 unchanged files, by host and paths, and it records absolute paths. A snapshot is mounted at
 a different path every night (`/opt/.dsb-snapshots/dsb-<stack>-<ts>/…`), so backing it up
-directly would find no parent and re-read every file, about 123 GB a night on forge. Seen
+directly would find no parent and re-read every file, every night. Seen
 through `RESTIC_STAGE_DIR`, every snapshot of a stack records the same paths, and btrfs and
 ZFS snapshots keep inode numbers and ctimes, so restic's change detection (mtime, ctime,
 size, inode) holds. `tests/restic-btrfs-real.bats` proves it on real btrfs: after the first
@@ -97,7 +97,7 @@ config error.
 
 ## Install
 
-Done once per host (forge: programme part 5c). Nothing here is done by the scripts.
+Done once per host. Nothing here is done by the scripts.
 
 1. Install restic (`apt install restic` on Debian 13: 0.18.0). Do not share another tool's
    bundled binary (Backrest's, for example).
@@ -116,10 +116,10 @@ Done once per host (forge: programme part 5c). Nothing here is done by the scrip
    ALLOWED_APPDATA_PATH="/opt/appdata"          # = config.sh APPDATA_PATH = the other helpers'
    SNAPSHOT_HELPER="/usr/local/sbin/docker-backup-snapshot.sh"
    RESTIC_BIN="/usr/bin/restic"
-   RESTIC_REPO="/mnt/atlas/forge/backups/restic"
+   RESTIC_REPO="/mnt/backup/restic"
    RESTIC_PASSWORD_FILE="/etc/docker-backup-restic/password"
    RESTIC_RUN_AS="dsb-restic"
-   RESTIC_HOST="forge"
+   RESTIC_HOST="myhost"
    RESTIC_CACHE_DIR="/var/cache/docker-backup-restic"   # created, owned by RESTIC_RUN_AS
    RESTIC_STAGE_DIR="/run/docker-backup-restic"         # created, root 0700
    FLOOR_DAILY=7 FLOOR_WEEKLY=4 FLOOR_MONTHLY=0
@@ -145,8 +145,7 @@ config.sh keys (all optional; the defaults keep 0.7.0's behaviour):
 | `RESTIC_CHECK_SUBSET` | `auto` | `auto`, `n/N` or `x%` |
 
 The repository, password, user, binary and host name are **helper constants, never
-config.sh keys**: config.sh is writable by the backup user, and on forge it is tracked in
-git.
+config.sh keys**: config.sh is writable by the backup user, and may be tracked in git.
 
 The two cadences:
 
@@ -187,9 +186,9 @@ STATUS.md has the alert.
 pack files on each check, with `n` advancing by one per check period (a week with the
 default `RESTIC_CHECK_ON=full`, counted from the Unix epoch, so it does not depend on the
 run day). restic's `n/N` subsets are disjoint and together cover every pack, so twelve
-consecutive checks read the whole repository: once a quarter. At forge's estimated
-180-400 GB that is 15-35 GB read from the share per full run, next to the weekly tar set's
-123 GB, and a damaged pack is found within twelve weeks. A smaller `N` finds damage sooner
+consecutive checks read the whole repository: once a quarter. For a 180-400 GB repository
+that is 15-35 GB read per full run, a fraction of a weekly full tar set, and a damaged
+pack is found within twelve weeks. A smaller `N` finds damage sooner
 at a higher weekly cost; `x%` picks packs at random, so it gives no bound on when a pack
 is first read.
 
@@ -246,7 +245,7 @@ the plan's third question). Run the vendored drill on the host after install, as
 
 ```bash
 sudo bash tests/host/restore-drill.sh --backend both --probes --probe-user ted \
-    --restic-run-as dsb-restic --record-dest /mnt/atlas/forge/backups/docker-backups/forge
+    --restic-run-as dsb-restic --record-dest /mnt/backup/docker-backups/$(hostname)
 ```
 
 Its `--probes` checks, against a live restic process (each probe first shown to work against
@@ -269,7 +268,7 @@ its owner). Check `ls -ld` of the repository directory (owned by `RESTIC_RUN_AS`
   After 0.8.0's restore and verify are installed, tighten them once, as the share owner:
 
   ```bash
-  B=/mnt/atlas/forge/backups/docker-backups/forge
+  B=/mnt/backup/docker-backups/$(hostname)    # BACKUP_DEST/<hostname>
   find "$B" -mindepth 1 -maxdepth 1 -type d -name '[0-9]*_[0-9]*' -exec chmod 0700 {} +
   find "$B" -mindepth 2 -maxdepth 2 -type f \( -name '*.tar' -o -name '*.tar.*' \) -exec chmod 0600 {} +
   ```

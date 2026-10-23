@@ -37,7 +37,7 @@
 # --record-dest DIR: on a PASS, write DIR/restore-verified.json (per backend: time,
 # version, what was restored), as the owner of DIR; the next backup run carries it into
 # status.json and dsb_restore_verified_timestamp_seconds. DIR is the production
-# BACKUP_DEST/<hostname>, e.g. /mnt/atlas/forge/backups/docker-backups/forge.
+# BACKUP_DEST/<hostname>, e.g. /mnt/backup/docker-backups/myhost.
 #######################################
 set -uo pipefail
 umask 022
