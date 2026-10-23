@@ -6,6 +6,9 @@
 #######################################
 
 set -euo pipefail
+# Archives hold full appdata: 0600 archives, 0700 run dirs (#1089). Restore and verify read
+# them as their owner (lib.sh as_owner_of). status.json and the .prom set their own 0644.
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -124,6 +127,23 @@ STACK_SNAPSHOT_DELETE_FAILED=0
 # Run kind (lib.sh resolve_run_kind): full on FULL_RUN_DAY or with --full, else daily.
 FORCE_FULL_RUN=false
 RUN_KIND=daily
+
+# Backends (lib.sh validate_backends; RESTIC.md). Which run this run, set in main.
+TAR_THIS_RUN=false
+RESTIC_THIS_RUN=false
+# Why restic cannot be used this run (restic-repo-missing, restic-password-wrong, …):
+# every stack's restic backup then fails with this reason, and tar still runs.
+RESTIC_PROBLEM=""
+RESTIC_REPO_ID=""
+RESTIC_FLOOR_DAILY=0
+RESTIC_FLOOR_WEEKLY=0
+RESTIC_FLOOR_MONTHLY=0
+# prune / check this run: ok, failed, or empty (not scheduled / not run).
+RESTIC_PRUNE_RESULT=""
+RESTIC_CHECK_RESULT=""
+RESTIC_CHECK_SUBSET_USED=""
+# Per-stack forget results this run.
+RESTIC_FORGET_FAILED=0
 
 # Status contract (see STATUS.md). status.json is a regular file next to the run dirs:
 # restore, verify and cleanup enumerate only directories there, so a file is invisible
@@ -452,6 +472,14 @@ write_run_status() {
         --run-kind "$RUN_KIND" --platform "${RESOLVED_PLATFORM:-}" \
         --snapshot-backend "$SNAPSHOT_RESOLVED" --snapshot-note "$SNAPSHOT_NOTE" \
         --snapshot-cleanup-failed "$SNAPSHOT_CLEANUP_FAILED" --snapshot-swept "$SNAPSHOT_SWEPT" \
+        --backends "$BACKENDS" --tar-schedule "$TAR_SCHEDULE" --tar-ran "$TAR_THIS_RUN" \
+        --restic-ran "$RESTIC_THIS_RUN" --restic-problem "$RESTIC_PROBLEM" \
+        --restic-repo-id "$RESTIC_REPO_ID" \
+        --restic-prune "$RESTIC_PRUNE_RESULT" --restic-check "$RESTIC_CHECK_RESULT" \
+        --restic-check-subset "$RESTIC_CHECK_SUBSET_USED" \
+        --restic-snapshots "${RUN_TMP:-/nonexistent}/restic-snapshots.json" \
+        --restic-stats "${RUN_TMP:-/nonexistent}/restic-stats.json" \
+        --restore-verified "$BACKUP_DEST/$HOSTNAME/restore-verified.json" \
         --aborted "$aborted" 2>"$diag") || rc=$?
     [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$RUN_TMP/diag"
     [[ -n "$RUN_TMP" ]] && log_status_diagnostics "$diag"
@@ -598,6 +626,16 @@ simulate_backup_stack() {
         echo "      $line"
     done < <(dsb_status xbackup-describe "$xb_file" 2>/dev/null)
 
+    # Backends
+    local plan=""
+    [[ "$TAR_THIS_RUN" == true ]] && plan="tar"
+    if [[ "$RESTIC_THIS_RUN" == true ]]; then
+        plan+="${plan:+ + }restic${RESTIC_PROBLEM:+ (would fail: $RESTIC_PROBLEM)}"
+    fi
+    if [[ "$BACKENDS" != tar || "$TAR_SCHEDULE" != daily ]]; then
+        echo "      backends: $plan"
+    fi
+
     # Snapshot plan
     if [[ "$SNAPSHOT_RESOLVED" != none && $running_count -gt 0 ]]; then
         local check_out=""
@@ -644,6 +682,13 @@ backup_stack() {
     STACK_RECORD_OPTS=()
     DECLARED_EXCLUDES=()
     STACK_SNAPSHOT_DELETE_FAILED=0
+    STACK_XB_FILE=""
+    # Per backend this run: ok, failed, or empty when not scheduled.
+    STACK_TAR_RESULT=""
+    STACK_RESTIC_RESULT=""
+    STACK_RESTIC_REASON=""
+    STACK_RESTIC_SUMMARY=""
+    STACK_RESTIC_S=""
     
     # Find compose file
     local compose_file; compose_file=$(find_compose_file "$stack_path") || true
@@ -717,8 +762,22 @@ backup_stack() {
     local xb_file; xb_file=$(mktemp "$RUN_TMP/xbackup.XXXXXX")
     read_xbackup "$stack_path" "$stack_name" "$RUN_KIND" "$xb_file"
     STACK_RECORD_OPTS+=(--xbackup "$xb_file")
+    STACK_XB_FILE="$xb_file"
     if [[ ${#DECLARED_EXCLUDES[@]} -gt 0 ]]; then
         log "x-backup ($RUN_KIND run): leaving out $(join_by ', ' "${DECLARED_EXCLUDES[@]}")"
+    fi
+
+    # restic cannot be used this run (restic_preflight): its backup fails, counted. With
+    # no tar to make either, there is nothing to stop the stack for.
+    if [[ "$RESTIC_THIS_RUN" == true && -n "$RESTIC_PROBLEM" ]]; then
+        STACK_RESTIC_RESULT=failed
+        STACK_RESTIC_REASON="$RESTIC_PROBLEM"
+        if [[ "$TAR_THIS_RUN" != true ]]; then
+            log_error "restic: $stack_name not backed up ($RESTIC_PROBLEM)"
+            STACK_FAIL_POINT="$RESTIC_PROBLEM"
+            backend_record_opts
+            return 1
+        fi
     fi
 
     # Snapshot, or the old way? Decided before the stop, so the stack is stopped once.
@@ -741,7 +800,7 @@ backup_stack() {
         fi
     fi
 
-    mkdir -p "$backup_dir"
+    [[ "$TAR_THIS_RUN" == true ]] && mkdir -p "$backup_dir"
     
     # `stop`, not `down`: the containers are kept, so the restart below is a plain
     # `start` — no recreation, no image pull, no pending compose change applied.
@@ -808,9 +867,8 @@ backup_stack() {
         fi
     fi
     
-    log "Creating backup: $backup_file"
-    
-    # Create a temporary directory for organizing backup contents
+    # The stack's compose file and .env, for both backends: each helper reads them as the
+    # invoking user from this private dir.
     local temp_dir; temp_dir=$(mktemp -d)
     # Also kept globally: an exit from a signal trap never returns from this function,
     # so the RETURN trap below does not run, and the exit handler removes it instead.
@@ -825,61 +883,89 @@ backup_stack() {
     # function's return, and never leaks to outer frames.
     trap 'rm -rf "$temp_dir"; STACK_TMP=""; trap - RETURN' RETURN
     
-    # Copy compose file to temp directory
-    cp "$compose_file" "$temp_dir/"
+    # Copy compose file to temp directory. -p: the archive records the file's own mode,
+    # not one masked by this script's umask 077 (a 0644 compose file stays 0644).
+    cp -p "$compose_file" "$temp_dir/"
     
     # Copy any other files in the stack directory (env files, etc)
     if [[ -f "$stack_path/.env" ]]; then
-        cp "$stack_path/.env" "$temp_dir/"
+        cp -p "$stack_path/.env" "$temp_dir/"
     fi
     
-    # Create archive with configured compression
-    log "Creating ${COMPRESSION_METHOD} compressed backup (level ${COMPRESSION_LEVEL})..."
-    if [[ "$USE_PARALLEL" == true ]]; then
-        log "Using parallel compression"
+    # tar: written to <stack>.incomplete and renamed on success — see
+    # create_archive_atomic. From the snapshot, the member names are the same <stack>/…
+    # as from the live dir.
+    if [[ "$TAR_THIS_RUN" == true ]]; then
+        log "Creating backup: $backup_file"
+        log "Creating ${COMPRESSION_METHOD} compressed backup (level ${COMPRESSION_LEVEL})..."
+        if [[ "$USE_PARALLEL" == true ]]; then
+            log "Using parallel compression"
+        fi
+        STACK_TAR_RESULT=failed
+        # shellcheck disable=SC2034  # ARCHIVE_SNAPSHOT_TS is read by create_compressed_archive (lib.sh)
+        [[ "$use_snapshot" == true ]] && ARCHIVE_SNAPSHOT_TS="$TIMESTAMP"
+        if create_archive_atomic "$backup_file" \
+            -C "$temp_dir" . \
+            -C "$APPDATA_PATH" "$stack_name" 2>&1 | tee -a "$LOG_FILE"; then
+            STACK_TAR_RESULT=ok
+        fi
+        # shellcheck disable=SC2034  # read by create_compressed_archive (lib.sh)
+        ARCHIVE_SNAPSHOT_TS=""
+        if [[ "$STACK_TAR_RESULT" == ok ]]; then
+            log_success "Backup created: $backup_file"
+            STACK_ARCHIVE="$TIMESTAMP/${stack_name}${backup_ext}"
+            STACK_ARCHIVE_BYTES=$(stat -c %s -- "$backup_file" 2>/dev/null) || STACK_ARCHIVE_BYTES=""
+        else
+            log_error "Failed to create backup for $stack_name"
+        fi
     fi
-    
-    # Written to <stack>.incomplete and renamed on success — see create_archive_atomic.
-    # From the snapshot, the member names are the same <stack>/… as from the live dir.
-    local archived=false
-    # shellcheck disable=SC2034  # ARCHIVE_SNAPSHOT_TS is read by create_compressed_archive (lib.sh)
-    [[ "$use_snapshot" == true ]] && ARCHIVE_SNAPSHOT_TS="$TIMESTAMP"
-    if create_archive_atomic "$backup_file" \
-        -C "$temp_dir" . \
-        -C "$APPDATA_PATH" "$stack_name" 2>&1 | tee -a "$LOG_FILE"; then
-        archived=true
+
+    # restic: the same source (the snapshot, or the live dir while the stack is still
+    # stopped), the same excludes, one snapshot of this stack.
+    if [[ "$RESTIC_THIS_RUN" == true && -z "$RESTIC_PROBLEM" ]]; then
+        if restic_backup_stack "$temp_dir" "$stack_name" "$use_snapshot"; then
+            STACK_RESTIC_RESULT=ok
+        else
+            STACK_RESTIC_RESULT=failed
+        fi
     fi
-    # shellcheck disable=SC2034  # read by create_compressed_archive (lib.sh)
-    ARCHIVE_SNAPSHOT_TS=""
     DECLARED_EXCLUDES=()
     if [[ "$use_snapshot" == true ]]; then
         delete_inflight_snapshot || true
     fi
     snapshot_record_opts "$use_snapshot" "$snap_fallback" "$snap_s"
+    backend_record_opts
 
-    if [[ "$archived" == true ]]; then
-        log_success "Backup created: $backup_file"
-        STACK_ARCHIVE="$TIMESTAMP/${stack_name}${backup_ext}"
-        STACK_ARCHIVE_BYTES=$(stat -c %s -- "$backup_file" 2>/dev/null) || STACK_ARCHIVE_BYTES=""
-    else
-        log_error "Failed to create backup for $stack_name"
-        [[ "$restart_failed" == true ]] || STACK_FAIL_POINT="archive-failed"
-        # Restore only previously running containers (already running again after a
-        # snapshot)
-        if [[ -n "$running_containers" && "$use_snapshot" != true ]]; then
-            log "Restoring previously running containers"
-            restart_stack_with_retry "$stack_path" "$running_containers" || true
-        fi
-        return 1
+    # A backend failed: tar's reason first, then restic's (each is in the record).
+    local backend_failed=""
+    if [[ "$STACK_TAR_RESULT" == failed ]]; then
+        backend_failed=archive-failed
+    elif [[ "$STACK_RESTIC_RESULT" == failed ]]; then
+        backend_failed="${STACK_RESTIC_REASON:-restic-backup-failed}"
     fi
 
     if [[ "$use_snapshot" == true ]]; then
+        # Started again right after the snapshot.
         if [[ "$restart_failed" == true ]]; then
+            return 1
+        fi
+        if [[ -n "$backend_failed" ]]; then
+            STACK_FAIL_POINT="$backend_failed"
             return 1
         fi
         STACK_BACKUP_MODE="running"
         log_success "Stack $stack_name backed up from a snapshot and restarted successfully"
         return 0
+    fi
+
+    if [[ -n "$backend_failed" ]]; then
+        STACK_FAIL_POINT="$backend_failed"
+        # Restore only previously running containers.
+        if [[ -n "$running_containers" ]]; then
+            log "Restoring previously running containers"
+            restart_stack_with_retry "$stack_path" "$running_containers" || true
+        fi
+        return 1
     fi
     
     if [[ -z "$running_containers" ]]; then
@@ -906,6 +992,17 @@ backup_stack() {
     return 0
 }
 
+# backend_record_opts — the per-backend part of this stack's status record.
+backend_record_opts() {
+    [[ -n "$STACK_TAR_RESULT" ]] && STACK_RECORD_OPTS+=(--tar-result "$STACK_TAR_RESULT")
+    if [[ -n "$STACK_RESTIC_RESULT" ]]; then
+        STACK_RECORD_OPTS+=(--restic-result "$STACK_RESTIC_RESULT"
+            --restic-reason "$STACK_RESTIC_REASON"
+            --restic-summary "$STACK_RESTIC_SUMMARY" --restic-s "$STACK_RESTIC_S")
+    fi
+    return 0
+}
+
 # snapshot_record_opts <used:true|false> <fallback_reason> <snapshot_s> — the snapshot
 # part of this stack's status record, when a snapshot backend is in use.
 snapshot_record_opts() {
@@ -915,6 +1012,140 @@ snapshot_record_opts() {
     STACK_RECORD_OPTS+=(--snapshot-backend "$SNAPSHOT_RESOLVED" --snapshot-used "$used"
         --snapshot-fallback "$2" --snapshot-s "$3"
         --snapshot-delete-failed "$STACK_SNAPSHOT_DELETE_FAILED")
+}
+
+#######################################
+# restic (RESTIC.md). Everything goes through the root helper (lib.sh restic_helper).
+#######################################
+# restic_preflight — reads the helper's constants and the repository. A setting below the
+# helper's retention floors stops the run (invalid config). Anything that makes restic
+# unusable sets RESTIC_PROBLEM instead: each stack's restic backup then fails with it,
+# counted, and tar still runs where scheduled.
+restic_preflight() {
+    local info="" key val h_appdata="" rc=0
+    if ! info=$(restic_helper info 2>>"$LOG_FILE"); then
+        RESTIC_PROBLEM=restic-helper-failed
+        log_error "restic: the helper's 'info' failed (see $LOG_FILE); restic is not used this run"
+        return 0
+    fi
+    while IFS='=' read -r key val; do
+        case "$key" in
+            appdata)       h_appdata="$val" ;;
+            floor_daily)   [[ "$val" =~ ^[0-9]{1,4}$ ]] && RESTIC_FLOOR_DAILY=$((10#$val)) ;;
+            floor_weekly)  [[ "$val" =~ ^[0-9]{1,4}$ ]] && RESTIC_FLOOR_WEEKLY=$((10#$val)) ;;
+            floor_monthly) [[ "$val" =~ ^[0-9]{1,4}$ ]] && RESTIC_FLOOR_MONTHLY=$((10#$val)) ;;
+        esac
+    done <<< "$info"
+    if [[ "$h_appdata" != "$APPDATA_PATH" ]]; then
+        RESTIC_PROBLEM=restic-helper-failed
+        log_error "restic: the helper's ALLOWED_APPDATA_PATH ($(printable "$h_appdata")) is not APPDATA_PATH; restic is not used this run"
+        return 0
+    fi
+    if (( RESTIC_KEEP_DAILY < RESTIC_FLOOR_DAILY || RESTIC_KEEP_WEEKLY < RESTIC_FLOOR_WEEKLY \
+          || RESTIC_KEEP_MONTHLY < RESTIC_FLOOR_MONTHLY )); then
+        log_error "RESTIC_KEEP_DAILY/WEEKLY/MONTHLY ($RESTIC_KEEP_DAILY/$RESTIC_KEEP_WEEKLY/$RESTIC_KEEP_MONTHLY) are below the restic helper's floors ($RESTIC_FLOOR_DAILY/$RESTIC_FLOOR_WEEKLY/$RESTIC_FLOOR_MONTHLY)"
+        return 1
+    fi
+    local out=""
+    out=$(restic_helper repo 2>>"$LOG_FILE") || rc=$?
+    if [[ $rc -ne 0 ]]; then
+        RESTIC_PROBLEM=$(restic_problem_for_rc "$rc")
+        log_error "restic: the repository cannot be used ($RESTIC_PROBLEM, exit $rc); every stack's restic backup fails this run"
+        return 0
+    fi
+    [[ "$out" =~ ^id=([0-9a-f]{64})$ ]] && RESTIC_REPO_ID="${BASH_REMATCH[1]}"
+    log "✓ restic repository ${RESTIC_REPO_ID:0:10} (helper: $RESTIC_HELPER_PATH)"
+    return 0
+}
+
+# restic_backup_stack <temp_dir> <stack> <from_snapshot:true|false> — one restic snapshot
+# of the stack, from the same source tar reads, with the same excludes. Sets
+# STACK_RESTIC_SUMMARY (the helper's JSON summary file), STACK_RESTIC_S, and
+# STACK_RESTIC_REASON on failure. Returns 0 on success.
+restic_backup_stack() {
+    local temp_dir="$1" stack="$2"
+    local -a from=() declared=()
+    [[ "$3" == true ]] && from=(--from-snapshot)
+    local p
+    for p in "${DECLARED_EXCLUDES[@]+"${DECLARED_EXCLUDES[@]}"}"; do
+        valid_declared_path "$p" || { log_error "Invalid declared path refused"; STACK_RESTIC_REASON=restic-backup-failed; return 1; }
+        declared+=("$stack/$p")
+    done
+    [[ ${#declared[@]} -gt 0 ]] && declared=(-- "${declared[@]}")
+    STACK_RESTIC_SUMMARY="$RUN_TMP/restic-$stack.json"
+    log "restic: backing up $stack${from[0]:+ from its snapshot}"
+    local t0 rc=0
+    t0=$(date +%s)
+    restic_helper backup "$temp_dir" "$stack" "$TIMESTAMP" "$RUN_KIND" \
+        "${from[@]+"${from[@]}"}" \
+        "${EXCLUDE_PATTERNS[@]+"${EXCLUDE_PATTERNS[@]}"}" \
+        "${declared[@]+"${declared[@]}"}" > "$STACK_RESTIC_SUMMARY" 2>>"$LOG_FILE" || rc=$?
+    STACK_RESTIC_S=$(( $(date +%s) - t0 ))
+    if [[ $rc -ne 0 ]]; then
+        if [[ $rc -eq 11 ]]; then
+            STACK_RESTIC_REASON=restic-repo-locked
+        else
+            STACK_RESTIC_REASON=restic-backup-failed
+        fi
+        log_error "restic: backup of $stack failed (exit $rc; 3 = some files could not be read, 11 = repository locked)"
+        return 1
+    fi
+    log_success "restic: $stack backed up (${STACK_RESTIC_S}s)"
+    return 0
+}
+
+# restic_forget_stack <stack> <xbackup_file> — retention for one stack: x-backup.retention,
+# key by key, else RESTIC_KEEP_*. Counts below the helper's floors are refused here (and
+# by the helper), never raised. Adds the result to STACK_RECORD_OPTS.
+restic_forget_stack() {
+    local stack="$1" xb_file="$2" keep d w m result=ok
+    keep=$(dsb_status retention "$xb_file" "$RESTIC_KEEP_DAILY" "$RESTIC_KEEP_WEEKLY" "$RESTIC_KEEP_MONTHLY" 2>/dev/null) \
+        || keep="$RESTIC_KEEP_DAILY $RESTIC_KEEP_WEEKLY $RESTIC_KEEP_MONTHLY"
+    read -r d w m <<< "$keep"
+    local out="$RUN_TMP/forget-$stack.json"
+    : > "$out"
+    if [[ ! "${d:-}" =~ ^[0-9]+$ || ! "${w:-}" =~ ^[0-9]+$ || ! "${m:-}" =~ ^[0-9]+$ ]]; then
+        log_error "restic: cannot tell $stack's retention; nothing forgotten"
+        result=failed
+        d="" w="" m=""
+    elif (( d < RESTIC_FLOOR_DAILY || w < RESTIC_FLOOR_WEEKLY || m < RESTIC_FLOOR_MONTHLY )); then
+        log_error "restic: $stack's x-backup.retention ($d/$w/$m) is below the helper's floors ($RESTIC_FLOOR_DAILY/$RESTIC_FLOOR_WEEKLY/$RESTIC_FLOOR_MONTHLY); nothing forgotten"
+        result=refused
+    elif ! restic_helper forget "$stack" "$d" "$w" "$m" > "$out" 2>>"$LOG_FILE"; then
+        log_error "restic: forget for $stack failed"
+        result=failed
+    fi
+    [[ "$result" == ok ]] || RESTIC_FORGET_FAILED=$((RESTIC_FORGET_FAILED + 1))
+    STACK_RECORD_OPTS+=(--forget-result "$result" --forget-file "$out" --retention "$d $w $m")
+}
+
+# restic_maintenance — after every stack: prune and check when scheduled, then the
+# snapshot list (for orphan stacks) and the repository stats, for the status contract.
+restic_maintenance() {
+    [[ "$RESTIC_THIS_RUN" == true && -z "$RESTIC_PROBLEM" ]] || return 0
+    if schedule_due "$RESTIC_PRUNE_ON" "$RUN_KIND"; then
+        log "restic: prune"
+        if restic_helper prune >> "$LOG_FILE" 2>&1; then
+            RESTIC_PRUNE_RESULT=ok
+        else
+            RESTIC_PRUNE_RESULT=failed
+            log_error "restic: prune failed (see $LOG_FILE)"
+        fi
+    fi
+    if schedule_due "$RESTIC_CHECK_ON" "$RUN_KIND"; then
+        RESTIC_CHECK_SUBSET_USED=$(restic_check_subset)
+        log "restic: check --read-data-subset=$RESTIC_CHECK_SUBSET_USED"
+        if restic_helper check "$RESTIC_CHECK_SUBSET_USED" >> "$LOG_FILE" 2>&1; then
+            RESTIC_CHECK_RESULT=ok
+        else
+            RESTIC_CHECK_RESULT=failed
+            log_error "restic: check failed (see $LOG_FILE): the repository may be damaged"
+        fi
+    fi
+    restic_helper snapshots > "$RUN_TMP/restic-snapshots.json" 2>>"$LOG_FILE" \
+        || { log_warning "restic: could not list snapshots"; rm -f -- "$RUN_TMP/restic-snapshots.json"; }
+    restic_helper stats > "$RUN_TMP/restic-stats.json" 2>>"$LOG_FILE" \
+        || { log_warning "restic: could not read the repository stats"; rm -f -- "$RUN_TMP/restic-stats.json"; }
 }
 
 #######################################
@@ -963,6 +1194,8 @@ main() {
     done
     
     RUN_KIND=$(resolve_run_kind)
+    tar_scheduled "$RUN_KIND" && TAR_THIS_RUN=true
+    backend_enabled restic && RESTIC_THIS_RUN=true
 
     if [[ "$coverage_report" == true ]]; then
         # stdout is the JSON only: no lock is taken, so release_lock logs nothing at exit.
@@ -998,6 +1231,7 @@ main() {
     log "OS: $OS_NAME ($OS_TYPE)"
     log "Platform: ${RESOLVED_PLATFORM:-generic} (PLATFORM=$(printable "${PLATFORM:-auto}"))"
     log "Run kind: $RUN_KIND (full on day $(printable "${FULL_RUN_DAY:-7}") of the week, or with --full)"
+    log "Backends: $(printable "$BACKENDS") (tar: $(printable "$TAR_SCHEDULE"); this run: tar $TAR_THIS_RUN, restic $RESTIC_THIS_RUN)"
     log "========================================="
     
     # Require root, unless ELEVATION_CMD is configured to elevate archive creation
@@ -1006,7 +1240,7 @@ main() {
         exit 1
     fi
     
-    if ! validate_numeric_config || ! validate_platform; then
+    if ! validate_numeric_config || ! validate_platform || ! validate_backends; then
         ABORT_REASON="invalid-config"
         exit 1
     fi
@@ -1022,6 +1256,12 @@ main() {
     if ! run_preflight_checks; then
         log_error "Pre-flight checks failed, aborting"
         ABORT_REASON="preflight-failed"
+        exit 1
+    fi
+    # restic: the helper's floors are config validation; an unusable repository is not
+    # an abort (RESTIC_PROBLEM), so tar still runs.
+    if [[ "$RESTIC_THIS_RUN" == true ]] && ! restic_preflight; then
+        ABORT_REASON="invalid-config"
         exit 1
     fi
 
@@ -1120,6 +1360,10 @@ main() {
         echo "  Compression method: ${COMPRESSION_METHOD}"
         echo "  Backup extension: ${backup_ext}"
         echo "  Run kind: ${RUN_KIND}"
+        echo "  Backends: ${BACKENDS} (tar: ${TAR_SCHEDULE}; this run: tar ${TAR_THIS_RUN}, restic ${RESTIC_THIS_RUN}${RESTIC_PROBLEM:+, $RESTIC_PROBLEM})"
+        if [[ "$TAR_THIS_RUN" != true ]]; then
+            echo "  (no tar archives this run: the size estimate is what restic reads)"
+        fi
         echo "  Snapshot backend: ${SNAPSHOT_RESOLVED}${SNAPSHOT_NOTE:+ ($SNAPSHOT_NOTE)}"
         echo ""
         
@@ -1176,6 +1420,10 @@ main() {
         IN_STACK=true
         backup_stack "$stack_path" || result=$?
         IN_STACK=false
+        # Retention right after the stack's own snapshot, once its services are back.
+        if [[ "${STACK_RESTIC_RESULT:-}" == ok && -z "$PENDING_SIGNAL" ]]; then
+            restic_forget_stack "$stack_name" "$STACK_XB_FILE"
+        fi
         local stack_finished; stack_finished=$(date +%s)
         local rec_result=failed rec_reason="${STACK_FAIL_REASON:-${STACK_FAIL_POINT:-}}"
         if [[ $result -eq 0 ]]; then
@@ -1213,6 +1461,8 @@ main() {
     # Remove this run's timestamp dir if nothing was archived into it (rmdir only
     # removes an empty dir, so a dir holding any archive is left alone).
     rmdir "$BACKUP_DEST/$HOSTNAME/$TIMESTAMP" 2>/dev/null || true
+
+    restic_maintenance
     
     local details=""
     if [[ ${#stopped_names[@]} -gt 0 ]]; then
@@ -1226,6 +1476,15 @@ main() {
     fi
     if [[ $SNAPSHOT_CLEANUP_FAILED -gt 0 ]]; then
         details+="Snapshot cleanup failed: $SNAPSHOT_CLEANUP_FAILED (leftover snapshots pin disk; see the log)"$'\n'
+    fi
+    # restic maintenance: none of it fails a stack, but each failure fails the run.
+    local -a restic_issues=()
+    [[ -n "$RESTIC_PROBLEM" ]] && restic_issues+=("repository unusable ($RESTIC_PROBLEM)")
+    [[ $RESTIC_FORGET_FAILED -gt 0 ]] && restic_issues+=("forget failed for $RESTIC_FORGET_FAILED stack(s)")
+    [[ "$RESTIC_PRUNE_RESULT" == failed ]] && restic_issues+=("prune failed")
+    [[ "$RESTIC_CHECK_RESULT" == failed ]] && restic_issues+=("check failed (subset $RESTIC_CHECK_SUBSET_USED)")
+    if [[ ${#restic_issues[@]} -gt 0 ]]; then
+        details+="restic: $(join_by '; ' "${restic_issues[@]}")"$'\n'
     fi
     details="${details%$'\n'}"
     
@@ -1249,11 +1508,14 @@ main() {
     if [[ $SNAPSHOT_CLEANUP_FAILED -gt 0 ]]; then
         log_warning "Snapshot cleanup failed: $SNAPSHOT_CLEANUP_FAILED"
     fi
+    if [[ ${#restic_issues[@]} -gt 0 ]]; then
+        log_error "restic: $(join_by '; ' "${restic_issues[@]}")"
+    fi
     log "========================================="
     
     # Send notifications
     local rc=0
-    if [[ $failed -gt 0 ]]; then
+    if [[ $failed -gt 0 || ${#restic_issues[@]} -gt 0 ]]; then
         send_notifications "failure" "$backed_up" "$skipped" "$failed" "$total_stacks" "$details"
         rc=1
     else
@@ -1268,7 +1530,7 @@ main() {
     [[ $status_rc -ne 0 ]] && rc=1
     # A run whose status could not be written is not reported healthy: the record the
     # alerts read is now stale.
-    if [[ $failed -eq 0 && $status_rc -eq 0 ]]; then
+    if [[ $failed -eq 0 && $status_rc -eq 0 && ${#restic_issues[@]} -eq 0 ]]; then
         send_ping success
     else
         send_ping fail

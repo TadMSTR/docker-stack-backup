@@ -36,6 +36,13 @@ DOCKHAND_APPEND_HOSTNAME="${DOCKHAND_APPEND_HOSTNAME:-true}"
 APPDATA_PATH="${APPDATA_PATH:-/mnt/datastor/appdata}"
 LOG_FILE="${LOG_FILE:-/var/log/docker-restore.log}"
 
+# Where the backup comes from: tar (a run dir on the share) or restic (a snapshot in the
+# repository behind RESTIC_HELPER_PATH, RESTIC.md). Steps 4-6 are the same for both: each
+# reads one tar stream (archive_read).
+restore_source=tar
+selected_backup_file=""
+selected_restic_id=""
+
 
 print_header() {
     echo -e "\n${BOLD}${BLUE}═══════════════════════════════════════════════════════${NC}"
@@ -102,6 +109,145 @@ require_timestamp_name() {
 }
 
 #######################################
+# Select the source (only when a restic helper is configured)
+#######################################
+select_source() {
+    restore_source=tar
+    if [[ -z "${RESTIC_HELPER_PATH:-}" || ! -f "${RESTIC_HELPER_PATH:-}" ]]; then
+        return 0
+    fi
+    print_section "Step 0: Select Backup Source"
+    echo -e "  ${GREEN}1)${NC} tar archives on the share ($BACKUP_BASE)"
+    echo -e "  ${GREEN}2)${NC} restic snapshots of this host"
+    echo ""
+    local selection; selection=$(prompt_input "Select source" "1")
+    case "$selection" in
+        1) restore_source=tar ;;
+        2) restore_source=restic ;;
+        *) log_error "Invalid selection"; exit 1 ;;
+    esac
+}
+
+# The restic helper, directly: restore runs as root.
+restore_restic_helper() {
+    "$RESTIC_HELPER_PATH" "$@"
+}
+
+#######################################
+# restic: select stack, then snapshot (Steps 2-3 of a restic restore)
+#######################################
+select_restic_snapshot() {
+    print_section "Step 2: Select Stack (restic)"
+    # The repository is this host's (the helper only lists RESTIC_HOST's snapshots).
+    selected_hostname="$HOSTNAME"
+    require_plain_name "host" "$selected_hostname"
+    local list; list=$(mktemp)
+    if ! restore_restic_helper snapshots > "$list"; then
+        rm -f -- "$list"
+        log_error "Could not list the restic snapshots (see the helper's message above)"
+        exit 1
+    fi
+    # stack<TAB>id<TAB>time<TAB>kind, newest first; names and ids checked by the parser.
+    local -a rows=()
+    mapfile -t rows < <(python3 -I "$SCRIPT_DIR/dsb_status.py" restic-snapshots "$list")
+    rm -f -- "$list"
+    if [[ ${#rows[@]} -eq 0 ]]; then
+        log_error "No restic snapshots found for this host"
+        exit 1
+    fi
+    local -a stacks=()
+    local row name seen=" "
+    for row in "${rows[@]}"; do
+        name="${row%%$'\t'*}"
+        if [[ "$seen" != *" $name "* ]]; then
+            stacks+=("$name")
+            seen+="$name "
+        fi
+    done
+    echo "Stacks with restic snapshots:"
+    local i=1 n
+    for name in "${stacks[@]}"; do
+        n=$(printf '%s\n' "${rows[@]}" | grep -c "^$name"$'\t') || n=0
+        printf '  %b%s)%b %s (%s snapshots)\n' "$GREEN" "$i" "$NC" "$(printable "$name")" "$n"
+        ((i++))
+    done
+    echo ""
+    local selection; selection=$(prompt_input "Select stack number" "1")
+    if [[ ! "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -gt ${#stacks[@]} ]]; then
+        log_error "Invalid selection"
+        exit 1
+    fi
+    selected_stack="${stacks[$((selection-1))]}"
+    require_plain_name "stack" "$selected_stack"
+
+    print_section "Step 3: Select Snapshot (newest first)"
+    local -a ids=()
+    i=1
+    local id t kind
+    for row in "${rows[@]}"; do
+        IFS=$'\t' read -r name id t kind <<< "$row"
+        [[ "$name" == "$selected_stack" ]] || continue
+        ids+=("$id")
+        printf '  %b%s)%b %s  %s  (%s run)\n' "$GREEN" "$i" "$NC" "${id:0:8}" "$(printable "$t")" "$(printable "$kind")"
+        ((i++))
+    done
+    echo ""
+    selection=$(prompt_input "Select snapshot number" "1")
+    if [[ ! "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -gt ${#ids[@]} ]]; then
+        log_error "Invalid selection"
+        exit 1
+    fi
+    selected_restic_id="${ids[$((selection-1))]}"
+    if [[ ! "$selected_restic_id" =~ ^[0-9a-f]{64}$ ]]; then
+        log_error "Invalid snapshot id"
+        exit 1
+    fi
+    printf '\n%b✓%b Selected: %b%s%b snapshot %s\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_stack")" "$NC" "${selected_restic_id:0:8}"
+}
+
+#######################################
+# The selected backup as one tar stream (Steps 4 and 6)
+# archive_read <tar args...> — runs `tar <args> -f -` on the archive or the restic dump.
+# A tar archive is read AS ITS OWNER, the owner of the host dir it is under (#1089): with
+# root squash on the share, root cannot read a 0600 archive in a 0700 run dir. tar itself
+# still runs as root, so an extract keeps the recorded owners. A restic snapshot comes from
+# the helper's dump, which has the tar archive's member layout (RESTIC.md "Restore").
+#######################################
+archive_read() {
+    if [[ "$restore_source" == restic ]]; then
+        restore_restic_helper dump "$selected_stack" "$selected_restic_id" | tar "$@" -f -
+        return
+    fi
+    # tar does not detect compression on a pipe: take it from the suffix Step 3 allowed.
+    local -a z=()
+    case "$selected_backup_file" in
+        *.tar.gz)  z=(-z) ;;
+        *.tar.bz2) z=(-j) ;;
+        *.tar.xz)  z=(-J) ;;
+        *.tar.zst) z=(--zstd) ;;
+    esac
+    as_owner_of "$(share_owner_path)" cat -- "$selected_backup_file" | tar "${z[@]+"${z[@]}"}" "$@" -f -
+}
+
+# The path whose owner reads the share: the selected host's dir (stat-able as root even
+# when the run dirs below it are 0700 on a root-squashed export), else BACKUP_BASE.
+share_owner_path() {
+    if [[ -n "${selected_hostname:-}" ]]; then
+        echo "$BACKUP_BASE/$selected_hostname"
+    else
+        echo "$BACKUP_BASE"
+    fi
+}
+
+# share_list <dir> <find tests...> — NUL-separated names (%f) under <dir>, listed as the
+# share's owner.
+share_list() {
+    local dir="$1"; shift
+    # ! -name '.*': the globs this replaces never matched dot-names.
+    as_owner_of "$(share_owner_path)" find "$dir" -mindepth 1 -maxdepth 1 ! -name '.*' "$@" -printf '%f\0' 2>/dev/null
+}
+
+#######################################
 # Select hostname
 #######################################
 select_hostname() {
@@ -110,11 +256,9 @@ select_hostname() {
     local -a hostnames=()
     local i=1
     
-    for host_dir in "$BACKUP_BASE"/*; do
-        if [[ -d "$host_dir" ]]; then
-            hostnames+=("${host_dir##*/}")
-        fi
-    done
+    # Read as the share's owner (#1089); sorted, as the glob was.
+    selected_hostname=""
+    mapfile -d '' -t hostnames < <(share_list "$BACKUP_BASE" -type d | sort -z)
     
     if [[ ${#hostnames[@]} -eq 0 ]]; then
         log_error "No backup hosts found in $BACKUP_BASE"
@@ -154,13 +298,8 @@ select_timestamp() {
     # loop in a subshell, so the parent's array was never set and `set -u` aborted at the
     # count below ("timestamps: unbound variable"). The wizard never got past this step
     # (#1094).
-    mapfile -t timestamps < <(
-        for backup_dir in "$host_dir"/*; do
-            if [[ -d "$backup_dir" ]]; then
-                basename "$backup_dir"
-            fi
-        done | sort -r
-    )
+    # As the share's owner (#1089): run dirs are 0700 since 0.8.0.
+    mapfile -d '' -t timestamps < <(share_list "$host_dir" -type d | sort -z -r)
     
     if [[ ${#timestamps[@]} -eq 0 ]]; then
         log_error "No backups found for host $selected_hostname"
@@ -176,7 +315,7 @@ select_timestamp() {
         # Guard against set -e/pipefail abort: a find or wc failure (e.g. a timestamp
         # dir that became unreadable between listing and now) must not kill the whole
         # preview — fall back to 0 (DSBAK-9 / #24, same class as DSBAK-8).
-        local stack_count; stack_count=$(find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) | wc -l) || stack_count=0
+        local stack_count; stack_count=$(as_owner_of "$(share_owner_path)" find "$host_dir/$timestamp" \( -name "*.tar.*" -o -name "*.tar" \) -printf x 2>/dev/null | wc -c) || stack_count=0
         
         printf '  %b%s)%b %s at %s (%s stacks)\n' "$GREEN" "$i" "$NC" "$(printable "$formatted_date")" "$(printable "$formatted_time")" "$stack_count"
         ((i++))
@@ -208,14 +347,19 @@ select_stack() {
 
     # Only the suffixes the backup writes (get_compression_extension), so the archive
     # path is built from validated parts plus a known suffix (round 3, F-05).
-    local ext backup_file
+    # Listed as the share's owner (#1089), sorted, as the glob was.
+    local -a sizes=()
+    local -a entries=()
+    mapfile -d '' -t entries < <(as_owner_of "$(share_owner_path)" find "$backup_dir" -mindepth 1 -maxdepth 1 \
+        -type f ! -name '.*' -printf '%s %f\0' 2>/dev/null | sort -z -k2)
+    local ext entry fname
     for ext in .tar.gz .tar.bz2 .tar.xz .tar.zst .tar; do
-        for backup_file in "$backup_dir"/*"$ext"; do
-            if [[ -f "$backup_file" ]]; then
-                # ${##*/}, not $(basename): command substitution strips trailing newlines.
-                local fname="${backup_file##*/}"
+        for entry in "${entries[@]+"${entries[@]}"}"; do
+            fname="${entry#* }"
+            if [[ "$fname" == *"$ext" && "$fname" != "$ext" ]]; then
                 stacks+=("${fname%"$ext"}")
-                stack_files+=("$backup_file")
+                stack_files+=("$backup_dir/$fname")
+                sizes+=("${entry%% *}")
             fi
         done
     done
@@ -227,9 +371,10 @@ select_stack() {
 
     echo "Available stacks:"
     for stack in "${stacks[@]}"; do
-        # du_size keeps only the number; `du -h f | cut -f1` reprinted the rest of a
-        # file name that holds a newline, a forged line on root's terminal (R2-01).
-        local size; size=$(du_size "${stack_files[$((i-1))]}" -h) || true
+        # The size find printed (digits only), never `du -h f | cut -f1`, which reprinted
+        # the rest of a file name that holds a newline on root's terminal (R2-01).
+        local size="${sizes[$((i-1))]}"
+        [[ "$size" =~ ^[0-9]+$ ]] && size=$(numfmt --to=iec "$size")
         printf '  %b%s)%b %s (%s)\n' "$GREEN" "$i" "$NC" "$(printable "$stack")" "$size"
         ((i++))
     done
@@ -246,6 +391,15 @@ select_stack() {
     require_plain_name "stack" "$selected_stack"
     selected_backup_file="${stack_files[$((selection-1))]}"
     printf '\n%b✓%b Selected stack: %b%s%b\n' "$GREEN" "$NC" "$BOLD" "$(printable "$selected_stack")" "$NC"
+}
+
+# What was selected, for log lines.
+selected_label() {
+    if [[ "$restore_source" == restic ]]; then
+        echo "restic snapshot ${selected_restic_id:0:8} of $selected_stack"
+    else
+        echo "$selected_backup_file"
+    fi
 }
 
 #######################################
@@ -268,7 +422,7 @@ preview_backup() {
     # --numeric-owner: tar -tv prints owner/group names raw, and a PAX name can hold line
     # breaks that replaced the preview with forged lines (round 4, R4-01). Numeric ids
     # remove that channel; the awk field positions are unchanged.
-    out=$(tar --numeric-owner -tvf "$selected_backup_file" | awk '
+    out=$(archive_read --numeric-owner -tv | awk '
         NR <= 20 { print "P\t" $0 }
         substr($1, 1, 1) ~ /[bcps]/ || substr($1, 4, 1) ~ /[sS]/ || substr($1, 7, 1) ~ /[sS]/ { print "X\t" $0 }
         $3 ~ /^[0-9]+$/ { bytes += $3 }
@@ -287,7 +441,7 @@ preview_backup() {
     done <<< "$out"
     local total_files="${summary% *}"
     if [[ $list_rc -ne 0 ]]; then
-        log_warning "Could not list $selected_backup_file (tar exit $list_rc) — the archive may be corrupt or truncated"
+        log_warning "Could not list $(selected_label) (tar exit $list_rc) — the archive may be corrupt or truncated"
         archive_extract_bytes=""
     else
         archive_extract_bytes="${summary#* }"
@@ -415,7 +569,10 @@ check_restore_space() {
 
     local need_extract="${archive_extract_bytes:-}"
     if [[ ! "$need_extract" =~ ^[0-9]+$ ]]; then
-        need_extract=$(stat -c %s -- "$selected_backup_file" 2>/dev/null) || need_extract=0
+        need_extract=0
+        if [[ "$restore_source" == tar ]]; then
+            need_extract=$(as_owner_of "$(share_owner_path)" stat -c %s -- "$selected_backup_file" 2>/dev/null) || need_extract=0
+        fi
     fi
     # Member sizes are as the archive declares them. 19+ digits would wrap bash's 64-bit
     # arithmetic and make the comparison below pass (audit p3a F-05).
@@ -545,8 +702,8 @@ perform_restore() {
     # Extract first, while the stack is still up: a corrupt archive or a full disk
     # then costs no downtime and changes nothing.
     log "Extracting backup..."
-    if ! tar -xf "$selected_backup_file" -C "$temp_restore"; then
-        log_error "Could not extract $selected_backup_file — nothing was changed"
+    if ! archive_read -x -C "$temp_restore"; then
+        log_error "Could not extract $(selected_label) — nothing was changed"
         return 1
     fi
 
@@ -640,16 +797,21 @@ main() {
     fi
     
     # Interactive selection process
-    select_hostname
-    select_timestamp
-    select_stack
+    select_source
+    if [[ "$restore_source" == restic ]]; then
+        select_restic_snapshot
+    else
+        select_hostname
+        select_timestamp
+        select_stack
+    fi
     preview_backup
     check_conflicts
     perform_restore
     
     print_section "Restore Complete!"
     
-    log_success "Stack '$selected_stack' has been restored from backup"
+    log_success "Stack '$selected_stack' has been restored from $(selected_label)"
     if [[ -n "${safety_backup_dir:-}" ]]; then
         log "Pre-restore copy of the old data: $safety_backup_dir"
     fi

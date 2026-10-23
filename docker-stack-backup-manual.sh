@@ -5,6 +5,9 @@
 #######################################
 
 set -euo pipefail
+# 0600 archives, 0700 run dirs, as docker-stack-backup.sh (#1089). A manual backup is tar
+# only: restic snapshots are made by the scheduled run (RESTIC.md).
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -622,12 +625,13 @@ backup_stack() {
     STACK_TMP="$temp_dir"
     trap 'rm -rf "$temp_dir"; STACK_TMP=""; trap - RETURN' RETURN
     
-    # Copy compose file to temp directory
-    cp "$compose_file" "$temp_dir/"
+    # Copy compose file to temp directory. -p: the archive records the file's own mode,
+    # not one masked by this script's umask 077 (a 0644 compose file stays 0644).
+    cp -p "$compose_file" "$temp_dir/"
     
     # Copy any other files in the stack directory (env files, etc)
     if [[ -f "$stack_path/.env" ]]; then
-        cp "$stack_path/.env" "$temp_dir/"
+        cp -p "$stack_path/.env" "$temp_dir/"
     fi
     
     # Create archive with configured compression
