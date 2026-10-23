@@ -106,14 +106,14 @@ run_id() { js "$STATUS" 'd["run_id"]' | tr -d '"'; }
     unset RESTIC_HELPER_PATH
     run_backup
     [ "$status" -eq 0 ]
-    ! grep -q 'docker-backup-restic' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["backends"]')" = '["tar"]' ]
     [ "$(js "$STATUS" 'd["tar_ran"]')" = 'true' ]
     [ "$(js "$STATUS" 'd["restic"]')" = 'null' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["backends"]["tar"]["result"]')" = '"ok"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["backends"]["tar"]["archive"] == d["stacks"][0]["archive"]')" = 'true' ]
     grep -q '^dsb_backend_enabled{backend="tar",host=' "$PROM"
-    ! grep -q 'backend="restic"' "$PROM"
+    ! grep -q 'backend="restic"' "$PROM" || false
 }
 
 # combo <BACKENDS> <TAR_SCHEDULE> <daily|full> — one run; sets OPS, TAR_FILE (or "").
@@ -183,7 +183,7 @@ expect() {
     grep -q 'dsb_stack_backend_ok{backend="restic",host=.*} 0' "$PROM"
     grep -q 'dsb_stack_backend_ok{backend="tar",host=.*} 1' "$PROM"
     # No forget for a stack whose restic backup failed.
-    ! grep -q 'docker-backup-restic.sh forget' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic.sh forget' "$DOCKER_LOG" || false
 }
 
 @test "restic backup fails on the fallback path: the services are started again exactly once" {
@@ -219,7 +219,7 @@ STUB
     [ "$(js "$STATUS" 'd["restic"]["problem"]')" = '"restic-password-wrong"' ]
     [ "$(js "$STATUS" '[s["reason"] for s in d["stacks"]]')" = '["restic-password-wrong", "restic-password-wrong"]' ]
     [ "$(js "$STATUS" '[s["backends"]["tar"]["result"] for s in d["stacks"]]')" = '["ok", "ok"]' ]
-    ! grep -q 'docker-backup-restic.sh backup' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic.sh backup' "$DOCKER_LOG" || false
     grep -q '^dsb_restic_repo_available{host=.*} 0' "$PROM"
     [[ "$output" == *"repository unusable (restic-password-wrong)"* ]]
 }
@@ -256,7 +256,7 @@ STUB
     stack_config '{"retention": {"daily": 3}}'
     run_backup
     [ "$status" -eq 1 ]
-    ! grep -q 'docker-backup-restic.sh forget' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic.sh forget' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["stacks"][0]["result"]')" = '"backed_up"' ]
     [ "$(js "$STATUS" 'd["stacks"][0]["backends"]["restic"]["forget"]["result"]')" = '"refused"' ]
     [ "$(js "$STATUS" 'd["restic"]["forget"]["result"]')" = '"failed"' ]
@@ -276,7 +276,7 @@ STUB
     export BACKENDS=restic
     run_backup
     [ "$status" -eq 0 ]
-    ! grep -q 'docker-backup-restic.sh \(prune\|check\)' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic.sh \(prune\|check\)' "$DOCKER_LOG" || false
     [ "$(js "$STATUS" 'd["restic"]["prune"]')" = '{"result": null, "last_success": null}' ]
     : > "$DOCKER_LOG"
     run_backup --full
@@ -312,7 +312,7 @@ STUB
     run_backup
     [ "$status" -eq 0 ]
     [ "$(js "$STATUS" 'd["restic"]["orphan_stacks"]')" = '["gone"]' ]
-    ! grep -q 'docker-backup-restic.sh forget gone' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic.sh forget gone' "$DOCKER_LOG" || false
     grep -q '^dsb_restic_orphan_stacks{host=.*} 1' "$PROM"
     grep -q '^dsb_restic_repo_bytes{host=.*} 1000' "$PROM"
 }
@@ -353,11 +353,21 @@ STUB
     run_backup
     [ "$status" -eq 1 ]
     [[ "$output" == *"below the restic helper's floors"* ]]
-    ! grep -q 'compose stop' "$DOCKER_LOG"
-    export RESTIC_KEEP_DAILY=7 RESTIC_CHECK_SUBSET="1/2;id"
-    run_backup
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"RESTIC_CHECK_SUBSET must be"* ]]
+    ! grep -q 'compose stop' "$DOCKER_LOG" || false
+    export RESTIC_KEEP_DAILY=7
+    # Shape and range, as the helper checks them (CR-02): refused at config time.
+    local sub
+    for sub in "1/2;id" 0/4 5/4 150% 100.5% 1/0; do
+        export RESTIC_CHECK_SUBSET="$sub"
+        run_backup
+        [ "$status" -eq 1 ] || { echo "accepted: $sub" >&2; false; }
+        [[ "$output" == *"RESTIC_CHECK_SUBSET must be"* ]]
+    done
+    for sub in 1/12 12/12 100% 2.5%; do
+        export RESTIC_CHECK_SUBSET="$sub"
+        run_backup
+        [[ "$output" != *"RESTIC_CHECK_SUBSET must be"* ]] || { echo "refused: $sub" >&2; false; }
+    done
     # A global exclude pattern the helpers would refuse (here: one string with a space).
     export RESTIC_CHECK_SUBSET=auto EXCLUDE_PATTERNS="a b"
     run_backup
@@ -377,7 +387,7 @@ STUB
     [ "$status" -eq 0 ]
     [[ "$output" == *"Backends: tar restic (tar: full; this run: tar false, restic true)"* ]]
     [[ "$output" == *"backends: restic"* ]]
-    ! grep -q 'docker-backup-restic.sh \(backup\|forget\|prune\|check\)' "$DOCKER_LOG"
+    ! grep -q 'docker-backup-restic.sh \(backup\|forget\|prune\|check\)' "$DOCKER_LOG" || false
 }
 
 @test "#1089: archives are 0600 and new run/host dirs 0700" {

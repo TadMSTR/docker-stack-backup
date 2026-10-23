@@ -106,9 +106,9 @@ STUB
     # Real helper.
     run bash "$RH" snapshots
     [ "$status" -eq 0 ]
-    ! grep -q 'correct horse' "$RH_D/fake.env"
-    ! grep -q 'correct horse' "$RH_D/fake.argv"
-    ! grep -q -- '--password' "$RH_D/fake.argv"
+    ! grep -q 'correct horse' "$RH_D/fake.env" || false
+    ! grep -q 'correct horse' "$RH_D/fake.argv" || false
+    ! grep -q -- '--password' "$RH_D/fake.argv" || false
     [ "$(cat "$RH_D/fake.stdin")" = "correct horse" ]
 }
 
@@ -120,7 +120,7 @@ STUB
     grep -q '^RESTIC_REPOSITORY=/tmp/elsewhere' "$RH_D/fake.env"
     run bash "$RH" snapshots
     [ "$status" -eq 0 ]
-    ! grep -q '^RESTIC_REPOSITORY=\|^RESTIC_PASSWORD_COMMAND=\|^GODEBUG=' "$RH_D/fake.env"
+    ! grep -q '^RESTIC_REPOSITORY=\|^RESTIC_PASSWORD_COMMAND=\|^GODEBUG=' "$RH_D/fake.env" || false
     grep -qx -- "--repo" "$RH_D/fake.argv"
     grep -qx -- "$RH_REPO" "$RH_D/fake.argv"
 }
@@ -265,7 +265,7 @@ seed_days() {   # seed_days <stack> <host> <n> — one snapshot a day, n days ba
     run bash "$RH" check 2.5%
     [ "$status" -eq 0 ]
     local bad
-    for bad in 0/4 5/4 101% "1/4 --x" "--read-data" "1/4;id" "" 1/0; do
+    for bad in 0/4 5/4 101% 100.5% 150% "1/4 --x" "--read-data" "1/4;id" "" 1/0; do
         run bash "$RH" check "$bad"
         [ "$status" -eq 2 ]
     done
@@ -398,4 +398,35 @@ PY
     run rh_ns backup "$RH_TMP" web 20261023_020001 daily --from-snapshot
     [ "$status" -eq 1 ]
     [ -e "$RH_D/snap.calls" ]
+}
+
+@test "F-01: a stack dir swapped for a symlink between the check and the bind is refused, nothing backed up" {
+    rh_setup_ns
+    mkdir -p "$RH_D/secret"
+    echo "not the stack" > "$RH_D/secret/elsewhere"
+    # The race, made deterministic: a mount shim that, just before the stack's bind, swaps
+    # the (already checked) stack dir for a symlink to another directory.
+    cat > "$RH_SHIM/mount" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == --rbind ]]; then
+    mv -- "$RH_APPDATA/web" "$RH_APPDATA/web.real" && ln -s "$RH_D/secret" "$RH_APPDATA/web"
+fi
+exec /usr/bin/mount "\$@"
+STUB
+    chmod +x "$RH_SHIM/mount"
+    run rh_ns backup "$RH_TMP" web 20261023_020001 daily
+    echo "rc=$status $output" >&3
+    rm -f "$RH_APPDATA/web"; mv "$RH_APPDATA/web.real" "$RH_APPDATA/web"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"replaced"* ]]
+    [ "$(rh_restic snapshots --json | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))')" -eq 0 ]
+}
+
+@test "F-01: a stack dir that is itself a symlink, or reached through one, is refused at the check" {
+    rh_setup_ns
+    mv "$RH_APPDATA/web" "$RH_D/web-real"
+    ln -s "$RH_D/web-real" "$RH_APPDATA/web"
+    run rh_ns backup "$RH_TMP" web 20261023_020001 daily
+    [ "$status" -eq 2 ]
+    rm -f "$RH_APPDATA/web"; mv "$RH_D/web-real" "$RH_APPDATA/web"
 }

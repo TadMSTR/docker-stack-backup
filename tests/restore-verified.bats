@@ -38,6 +38,12 @@ record() {   # record <backend> <ref>
     [[ "$output" == *"backends=tar "* ]]
     run bash "$BATS_TEST_DIRNAME/host/restore-drill.sh" --backend zip
     [ "$status" -eq 2 ]
+    # An option without its value is a usage error, not an endless loop (CR-06).
+    local opt
+    for opt in --backend --restic-run-as --restic-bin --probe-user --record-dest; do
+        run timeout 10 bash "$BATS_TEST_DIRNAME/host/restore-drill.sh" "$opt"
+        [ "$status" -eq 2 ] || { echo "$opt: status $status" >&2; false; }
+    done
 }
 
 @test "the drill refuses to run for real without root" {
@@ -65,7 +71,7 @@ record() {   # record <backend> <ref>
 @test "restore-verified is untrusted share input: a symlink, another host's, garbage values are ignored" {
     run_backup
     [ "$(js "$STATUS" 'd["restore_verified"]')" = 'null' ]
-    ! grep -q dsb_restore_verified "$PROM"
+    ! grep -q dsb_restore_verified "$PROM" || false
     # A symlink to a valid file.
     record tar x
     mv "$RV" "$TEST_DIR/real.json"

@@ -97,6 +97,9 @@ rh_write() {
 }
 
 rh_setup_user() {
+    # The helper refuses RESTIC_RUN_AS=root, and unprivileged mode needs RESTIC_RUN_AS =
+    # the caller: as root there is no valid user-mode setup (CR-03).
+    [[ $EUID -ne 0 ]] || skip "user-mode helper tests do not run as root"
     need_restic
     rh_common "${TEST_DIR:?}/rh"
     mkdir -p "$RH_CACHE"

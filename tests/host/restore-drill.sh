@@ -55,16 +55,16 @@ RESTIC_BIN=/usr/bin/restic
 PROBE_USER="${SUDO_USER:-}"
 RECORD_DEST=""
 
-usage() { sed -n '3,9p' "$0" >&2; exit 2; }
+usage() { sed -n '6,10p' "$0" >&2; exit 2; }
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --backend)       BACKEND="${2:-}"; shift 2 ;;
+        --backend)       [[ $# -ge 2 ]] || usage; BACKEND="$2"; shift 2 ;;
         --probes)        PROBES=true; shift ;;
         --check)         CHECK_ONLY=true; shift ;;
-        --restic-run-as) RUN_AS="${2:-}"; shift 2 ;;
-        --restic-bin)    RESTIC_BIN="${2:-}"; shift 2 ;;
-        --probe-user)    PROBE_USER="${2:-}"; shift 2 ;;
-        --record-dest)   RECORD_DEST="${2:-}"; shift 2 ;;
+        --restic-run-as) [[ $# -ge 2 ]] || usage; RUN_AS="$2"; shift 2 ;;
+        --restic-bin)    [[ $# -ge 2 ]] || usage; RESTIC_BIN="$2"; shift 2 ;;
+        --probe-user)    [[ $# -ge 2 ]] || usage; PROBE_USER="$2"; shift 2 ;;
+        --record-dest)   [[ $# -ge 2 ]] || usage; RECORD_DEST="$2"; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -122,12 +122,41 @@ docker image inspect alpine:3 >/dev/null 2>&1 || { echo "image alpine:3 is not p
 # `[[ ! -e ]]` test followed by `mkdir -p` left a window in which another user could plant
 # a symlink there, and root would then write (and source) the scratch config.sh through it.
 mkdir -m 0700 -- "$D" 2>/dev/null || { echo "$D already exists (or cannot be created) — not running"; exit 1; }
+# From here on the drill owns $D and project dsb-drill: tear both down however it ends, so
+# a failed run does not leave them for the next one to refuse (CR-07).
+TEARDOWN_DONE=false
+RESULTS="${DRILL_RESULTS:-/root/dsb-restore-drill-$(date +%Y%m%d_%H%M%S)}"
+teardown() {
+    [[ "$TEARDOWN_DONE" == false ]] || return 0
+    TEARDOWN_DONE=true
+    echo "=== teardown ==="
+    cp "$D/backup.log" "$OUT/backup.log" 2>/dev/null
+    docker compose -p dsb-drill down 2>&1
+    local left; left=$(docker ps -aq --filter label=com.docker.compose.project=dsb-drill)
+    echo "dsb-drill containers left: ${left:-none}"
+    if [[ -d "$OUT" ]]; then
+        mkdir -p "$RESULTS" && cp -a "$OUT"/. "$RESULTS"/
+        [[ -n "${SUDO_USER:-}" ]] && chown -R "$SUDO_USER:" "$RESULTS"
+    fi
+    rm -rf -- /tmp/dsb-drill
+    if [[ -e $D ]]; then echo "WARN: $D still present"; else echo "$D removed"; fi
+}
+on_exit() {
+    local rc=$?
+    set +e
+    teardown
+    exit "$rc"
+}
+trap on_exit EXIT
 [[ -d "$D" && ! -L "$D" && "$(stat -c %u -- "$D")" == 0 ]] || { echo "$D is not root's own directory — not running"; exit 1; }
 chmod 0755 -- "$D"   # RESTIC_RUN_AS must traverse it to reach the scratch repository
 mkdir -p "$OUT" "$D/tmp" "$D/run" "$D/stacks/dsb-drill" "$A" "$D/backups" "$D/safety" "$S"
 export TMPDIR=$D/tmp
 unset BACKUP_BASE
 exec > >(tee "$OUT/drill-transcript.txt") 2>&1
+# Setup steps must not fail quietly (CR-04): errexit until the checks start (step 3),
+# where check() expects commands to fail and records them instead.
+set -e
 
 PASS=0; FAIL=0
 declare -A OK_BACKEND=()
@@ -243,9 +272,11 @@ probe_restic() {
     check "probes: $PROBE_USER cannot read restic's /proc/$pid/environ" "! ${as_probe[*]} cat /proc/$pid/environ >/dev/null 2>&1"
     check "probes: $PROBE_USER cannot read restic's fd 0 (the password)" "! ${as_probe[*]} cat /proc/$pid/fd/0 >/dev/null 2>&1"
     check "probes: $PROBE_USER cannot ptrace restic" "! ${as_probe[*]} python3 -I -c 'import ctypes,sys; l=ctypes.CDLL(None,use_errno=True); sys.exit(0 if l.ptrace(16,$pid,0,0)==0 else 1)'"
-    check "probes: the password is not in restic's argv or environ" "! grep -qF -- \"\$(cat $H/password)\" /proc/$pid/cmdline /proc/$pid/environ"
+    # -f: the pattern is read from the file, so the password is never in grep's own argv.
+    check "probes: the password is not in restic's argv or environ" "! grep -qFf $H/password /proc/$pid/cmdline /proc/$pid/environ"
 }
 
+set +e
 echo "=== 3. backup (${BACKENDS[*]}) ==="
 if [[ "$PROBES" == true && " ${BACKENDS[*]} " == *" restic "* ]]; then
     bash $S/docker-stack-backup.sh > "$OUT/backup-run.txt" 2>&1 &
@@ -361,16 +392,6 @@ if [[ -n "$RECORD_DEST" ]]; then
 fi
 
 echo "=== 7. results: $PASS pass, $FAIL fail ==="
-cp $D/backup.log "$OUT/backup.log" 2>/dev/null
-RESULTS="${DRILL_RESULTS:-/root/dsb-restore-drill-$(date +%Y%m%d_%H%M%S)}"
-
-echo "=== 8. teardown ==="
-docker compose -p dsb-drill down 2>&1
-left=$(docker ps -aq --filter label=com.docker.compose.project=dsb-drill)
-echo "dsb-drill containers left: ${left:-none}"
-mkdir -p "$RESULTS"; cp -a "$OUT"/. "$RESULTS"/
-[[ -n "${SUDO_USER:-}" ]] && chown -R "$SUDO_USER:" "$RESULTS"
-rm -rf -- /tmp/dsb-drill
-[[ -e $D ]] && echo "WARN: $D still present" || echo "$D removed"
+teardown
 echo "DONE: $PASS pass, $FAIL fail — results in $RESULTS"
 exit $(( FAIL > 0 ))

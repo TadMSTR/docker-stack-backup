@@ -261,7 +261,7 @@ x-backup:
   weekly:                  # backed up on the full run only
     - path: search/index
       reason: "rebuilt by reindex; a week's loss is acceptable"
-  retention:               # reserved for the restic backend (0.8.0); validated, not used yet
+  retention:               # restic backend only (0.8.0): this stack's forget counts; see RESTIC.md
     daily: 7
     weekly: 4
     monthly: 6

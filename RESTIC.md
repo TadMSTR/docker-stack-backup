@@ -52,8 +52,10 @@ For each stack, after the stop and (when snapshots are on) the snapshot and the 
 Inside the helper, the backup runs in a **private mount namespace**: a tmpfs is mounted on
 the fixed directory `RESTIC_STAGE_DIR`, the stack's compose file and `.env` are copied into
 it (read as the invoking user, as the tar helper does), the stack's appdata is bound
-read-only below it, and restic is run from there with relative paths. The mounts end with
-the namespace.
+read-only below it (the top bind; submounts below it keep their own flags), and restic is
+run from there with relative paths. The mounts end with the namespace. The stack dir must
+be a plain directory at its canonical path, and the helper checks that the bound directory
+is the same inode it checked, so a stack dir replaced by a symlink in between is refused.
 
 **Why the fixed directory.** restic chooses the parent snapshot, against which it detects
 unchanged files, by host and paths, and it records absolute paths. A snapshot is mounted at
@@ -168,7 +170,11 @@ A missing key takes the host default, so a stack that wants no monthlies says
 raised**: that stack's forget does not run, the result is `refused`, the run fails. A
 `RESTIC_KEEP_*` below the floors stops the run as `invalid-config`. The floors are a
 security control: the helper's grant can be driven by any process of the backup user, and
-without them `forget --keep-daily 1` would erase a stack's history.
+without them `forget --keep-daily 1` would erase a stack's history. **They protect what they
+name, and nothing more:** with the default monthly floor of 0, the grant can still remove a
+stack's monthly snapshots (`forget <stack> 7 4 0`, then `prune`), so history older than about
+four weeks is not protected by them. Set `FLOOR_MONTHLY` in the helper to protect monthlies
+too; every stack then keeps at least that many.
 
 `forget` runs after each stack's successful restic backup, scoped to this host and that
 stack's tag. A stack whose compose dir is gone keeps its snapshots (nothing forgets an

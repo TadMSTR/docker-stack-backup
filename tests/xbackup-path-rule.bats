@@ -58,6 +58,9 @@ restic_ok() {
 }
 
 @test "python, lib.sh and both root helpers accept and refuse exactly the same paths" {
+    # The restic helper copy runs as RESTIC_RUN_AS = the caller, which it refuses for root
+    # (CR-14): as root every path would read as refused.
+    [[ $EUID -ne 0 ]] || skip "the restic helper copy cannot run as root"
     local p py lib hp rp long
     long=$(printf 'a%.0s' {1..255})
     for p in "${PATHS[@]}" "$long" "${long}b" "$long/x"; do
@@ -75,12 +78,12 @@ restic_ok() {
 @test "a sample of the rule's verdicts (so equal-but-wrong copies would still fail)" {
     lib_ok models/blobs
     lib_ok .hidden
-    ! lib_ok ..
-    ! lib_ok a/../b
-    ! lib_ok /a
-    ! lib_ok -a
-    ! lib_ok 'a*'
-    ! lib_ok ''
+    ! lib_ok .. || false
+    ! lib_ok a/../b || false
+    ! lib_ok /a || false
+    ! lib_ok -a || false
+    ! lib_ok 'a*' || false
+    ! lib_ok '' || false
 }
 
 @test "the helper refuses a declared path for another stack, and '--' with nothing after it" {

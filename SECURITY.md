@@ -167,11 +167,19 @@ running btrfs or zfs.
   supplementary groups and `no_new_privs`, in a fixed environment (`env -i`).
 - **The password** is opened by root and handed to restic on stdin; it is never in argv,
   the environment, or a path restic opens.
-- **History cannot be erased through the grant**: forget refuses counts below the floors,
-  always filters by this host and the stack's tag, and groups by host only.
+- **Forget is bounded by the floors, and only by them**: it refuses counts below them
+  (default 7 daily, 4 weekly, 0 monthly), always filters by this host and the stack's tag,
+  and groups by host only. So the last 7 daily and 4 weekly snapshots of a stack cannot be
+  removed through the grant; **monthly snapshots can** (`forget <stack> 7 4 0`, then
+  `prune`), because the monthly floor is 0. Raise `FLOOR_MONTHLY` in the helper if the
+  monthlies must be protected too; a stack that then wants none cannot opt out.
 - **dump** only streams a snapshot whose id is one of this host's snapshots of the named
   stack.
 - The backup runs in a private mount namespace; its tmpfs and read-only bind end with it.
+  The stack dir must be a plain directory at its canonical path, and the bound dir must be
+  the same inode as the one checked, so a dir swapped for a symlink in between is refused.
+  Read-only applies to the top bind; submounts under the stack dir keep their own flags
+  (restic holds no write capability).
 
 `tests/restic-helper.bats` runs each negative probe first against a naive `sudo restic`
 style invocation, to show it fires, then against the real helper. Two checks need two

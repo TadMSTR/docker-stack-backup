@@ -274,6 +274,11 @@ case "$verb" in
         [[ $EUID -eq 0 ]] || refuse "backup needs root (a private mount namespace)"
 
         # Who the caller is (as the tar helper): sudo sets SUDO_UID, doas DOAS_USER.
+        # One elevation sets one of these. Both set means the caller supplied one through the
+        # environment (doas keepenv, a root wrapper): refuse rather than pick (audit p5b F-04).
+        if [[ -n "${SUDO_UID:-}" && -n "${DOAS_USER:-}" ]]; then
+            refuse "both SUDO_UID and DOAS_USER are set; cannot tell the invoking user"
+        fi
         invoker_uid="$EUID"
         invoker_gid=$(id -g)
         if [[ -n "${SUDO_UID:-}" ]]; then
@@ -326,6 +331,16 @@ case "$verb" in
                 || fail "snapshot source is not a directory"
         fi
 
+        # The stack dir's identity, pinned now and checked again after the bind (audit p5b
+        # F-01): /opt/appdata may be writable by the caller, who can replace a checked live
+        # stack dir with a symlink before the bind, and mount follows symlinks. The path must
+        # be canonical (no symlink anywhere in it) and the bound dir must be this inode.
+        src_dir="$source_root/$stack"
+        real=$(realpath -e -- "$src_dir" 2>/dev/null) || real=""
+        [[ "$real" == "$src_dir" && -d "$src_dir" && ! -L "$src_dir" ]] \
+            || refuse "the stack dir is not a plain directory at its canonical path: $src_dir"
+        src_id=$(stat -c '%d:%i' -- "$src_dir") || fail "cannot stat $src_dir"
+
         # The stage dir: a fixed mount point, root's, empty of meaning outside the namespace.
         if [[ ! -e "$RESTIC_STAGE_DIR" && ! -L "$RESTIC_STAGE_DIR" ]]; then
             mkdir -m 0700 -- "$RESTIC_STAGE_DIR" || fail "cannot create $RESTIC_STAGE_DIR"
@@ -377,7 +392,7 @@ case "$verb" in
         # relative paths. The mounts end with the namespace, whatever happens to restic.
         # This script text is a constant; only checked values are passed to it.
         ns_script='set -euo pipefail
-dir=$1 stage=$2 src=$3 stack=$4; shift 4
+dir=$1 stage=$2 src=$3 stack=$4 want=$5; shift 5
 mount -t tmpfs -o mode=0700,size=64m,nosuid,nodev,noexec dsb-restic "$dir"
 for n in compose.yaml compose.yml docker-compose.yaml docker-compose.yml .env; do
     if [[ -f "$stage/$n" ]]; then cp -p -- "$stage/$n" "$dir/$n"; fi
@@ -385,13 +400,18 @@ done
 mkdir -m 0700 -- "$dir/$stack"
 mount --rbind -- "$src/$stack" "$dir/$stack"
 mount -o remount,bind,ro,nosuid,nodev -- "$dir/$stack"
+# Read-only applies to the top bind only; submounts under the stack dir keep their own
+# flags (restic has no write capability, so that is not used). The bound dir must be the
+# one checked before the namespace: anything else was swapped in since.
+[[ "$(stat -c %d:%i -- "$dir/$stack")" == "$want" ]] \
+    || { echo "docker-backup-restic: the stack dir was replaced after it was checked; nothing backed up" >&2; exit 1; }
 cd -- "$dir"
 exec "$@"'
         rc=0
         # env -i: nothing of the caller's environment (BASH_ENV, SHELLOPTS, …) reaches the
         # root shell that runs the namespace script.
         unshare --mount --propagation private -- env -i PATH="$PATH" LC_ALL=C bash -c "$ns_script" _ \
-            "$RESTIC_STAGE_DIR" "$stage" "$source_root" "$stack" \
+            "$RESTIC_STAGE_DIR" "$stage" "$source_root" "$stack" "$src_id" \
             "${DROP[@]}" env -i "${RESTIC_ENV[@]}" "$RESTIC_BIN" --repo "$RESTIC_REPO" \
             backup --json --quiet --host "$RESTIC_HOST" --group-by host,paths \
             --tag dsb --tag "stack:$stack" --tag "kind:$kind" --tag "run:$ts" \
@@ -436,8 +456,9 @@ exec "$@"'
             (( 10#${BASH_REMATCH[1]} >= 1 && 10#${BASH_REMATCH[1]} <= 10#${BASH_REMATCH[2]} )) \
                 || refuse "invalid subset: n/N needs 1 <= n <= N"
             subset="$((10#${BASH_REMATCH[1]}))/$((10#${BASH_REMATCH[2]}))"
-        elif [[ "$subset" =~ ^([0-9]{1,3})(\.[0-9]{1,2})?%$ ]]; then
-            (( 10#${BASH_REMATCH[1]} <= 100 )) || refuse "invalid subset: at most 100%"
+        elif [[ "$subset" =~ ^([0-9]{1,3})(\.([0-9]{1,2}))?%$ ]]; then
+            (( 10#${BASH_REMATCH[1]} < 100 )) || { (( 10#${BASH_REMATCH[1]} == 100 )) && [[ "${BASH_REMATCH[3]:-0}" =~ ^0+$ ]]; } \
+                || refuse "invalid subset: at most 100%"
         else
             refuse "invalid subset (n/N or x%)"
         fi

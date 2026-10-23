@@ -77,7 +77,11 @@ hosts() {
     share_dir_readable "$BACKUP_BASE" "$BACKUP_BASE" \
         || printf '%b✗ cannot read %s as its owner%b\n' "$RED" "$(printable "$BACKUP_BASE")" "$NC" >&2
     mapfile -d '' -t h < <(names "$BACKUP_BASE" "$BACKUP_BASE" -type d)
-    printf '%s\0' "${h[@]+"${h[@]}"}"
+    # printf with no arguments still prints one NUL: an empty share would become one
+    # host named "" (CR-01).
+    if [[ ${#h[@]} -gt 0 ]]; then
+        printf '%s\0' "${h[@]}"
+    fi
 }
 
 list_backups() {
