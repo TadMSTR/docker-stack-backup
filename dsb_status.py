@@ -1586,6 +1586,11 @@ def restore_verified_entries(doc, now):
     return out
 
 
+# SECURITY[accepted]: anyone who can write the share can forge restore-verified.json and so
+# make dsb_restore_verified_timestamp_seconds show a fresh drill. The share is a root trust
+# boundary already (USAGE.md, vikunja#1100); this reader only bounds what such a file can
+# put into status.json. Do not read the metric as tamper-evident. Audit:
+# 2026-10-23/docker-stack-backup-2026-10-p5b-restic-backend (F-06).
 def read_restore_verified(path, host, now):
     """restore-verified.json from the share: untrusted input, like the previous
     status.json. Only well-formed entries are carried, each value bounded and printable."""
