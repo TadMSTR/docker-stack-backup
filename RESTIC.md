@@ -261,7 +261,9 @@ a process of the probe user itself): restic runs as `RESTIC_RUN_AS` with
 ptrace it; the password is in neither restic's cmdline nor environ. It then drills a tar
 and a restic restore of a scratch stack through every wizard step, plus a negative case
 for each, and records the passing backends in `restore-verified.json`. It uses a scratch
-repository and password, never the production ones.
+repository and password, never the production ones. The backup runs with `TMPDIR` unset,
+as from cron, so it goes through the helpers' production temp dir rule (`^/tmp/[^/]+$`);
+only the restore steps extract under `/tmp/dsb-drill/tmp` (0.8.1, #1218).
 
 Also as root, on the real share: `sudo bash backup-verify.sh --verify` and the restore
 wizard's Steps 1-4 on a real run dir after the chmod below (#1089: they read the share as
