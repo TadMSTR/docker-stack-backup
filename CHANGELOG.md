@@ -1,5 +1,37 @@
 # Changelog
 
+## [0.8.1] — 2026-10-24
+
+A fix to the host drill `tests/host/restore-drill.sh` only (#1218). The backup, restore and
+helper scripts are unchanged from 0.8.0 except `DSB_VERSION`. 0.8.0's drill, run as root
+on a real host for the first time (p5c), passed every tar check and every privilege probe
+but failed every restic check, then hung at teardown.
+
+### Fixed
+
+- **The drill's restic backup was refused (exit 2, `invalid temp_dir`).** The drill
+  exported `TMPDIR=/tmp/dsb-drill/tmp` for every step, so the backup's per-stack temp dir
+  was `/tmp/dsb-drill/tmp/tmp.X`, which the restic helper's rule (`^/tmp/[^/]+$`) refuses.
+  tar was not affected only because the drill runs it with `ELEVATION_CMD=none`, which
+  skips the tar helper's identical rule. The backup now runs with `TMPDIR` unset, as from
+  cron (`BACKUP_ENV`), and only the restore steps get `/tmp/dsb-drill/tmp`
+  (`RESTORE_ENV`), where "no temp extract dir left" still looks. The helper's rule is
+  unchanged. Production was never affected: cron sets no `TMPDIR`.
+- **The drill hung after teardown.** The "probes fire: … ptraces its own process" check
+  used `PTRACE_ATTACH` and never detached, so its own `sleep 30` stayed stopped (state T)
+  while holding the transcript pipe open, and teardown waited on `tee` forever. The probe
+  is now `tests/host/ptrace-probe.py`, which uses `PTRACE_SEIZE` (the same access check,
+  and the target is never stopped, restic included). The probe target writes to
+  `/dev/null`. A new check confirms the target was not left stopped, and teardown waits
+  at most 10 s for the transcript before killing `tee` and saying so in `teardown.txt`.
+
+### Added
+
+- `tests/restore-drill-env.bats`. It runs the REAL restic helper's backup under the
+  `BACKUP_ENV` that the drill reports in `--check` (local only: user namespaces and
+  restic), and shows the 0.8.0 environment refused with `invalid temp_dir`. It also shows
+  that `ptrace-probe.py` leaves its target running where `PTRACE_ATTACH` leaves it stopped.
+
 ## [0.8.0] — 2026-10-23
 
 restic as a second backend, a schedulable tar set, per-stack retention, restore from

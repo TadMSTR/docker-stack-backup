@@ -20,6 +20,7 @@ docker-backup-tar-create.sh    Root helper: tar of one stack (ELEVATION.md)
 docker-backup-snapshot.sh      Root helper: btrfs/ZFS snapshots (ELEVATION.md)
 docker-backup-restic.sh        Root helper: restic, as a dedicated uid (RESTIC.md)
 tests/host/restore-drill.sh    Host acceptance drill, run as root (both backends)
+tests/host/ptrace-probe.py     The drill's ptrace probe (PTRACE_SEIZE: never stops its target)
 dsb_status.py                  Run status helper (python3 -I, stdlib only): status.json,
                                .prom, coverage classifier, exemptions. See STATUS.md
 ```

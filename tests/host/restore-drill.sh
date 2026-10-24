@@ -54,6 +54,14 @@ RUN_AS=dsb-restic
 RESTIC_BIN=/usr/bin/restic
 PROBE_USER="${SUDO_USER:-}"
 RECORD_DEST=""
+# Temp dirs. The backup runs with TMPDIR unset, as from cron, so its per-stack temp dir is
+# /tmp/tmp.XXXXXXXXXX, the only shape the restic and tar helpers accept (^/tmp/[^/]+$).
+# The 0.8.0 drill exported TMPDIR=$D/tmp for everything, and the restic helper refused
+# the backup (exit 2, "invalid temp_dir"; #1218). Only the restore steps get $D/tmp, so
+# "no temp extract dir left" can look in a dir the drill owns. tests/restore-drill-env.bats
+# runs the real helper under BACKUP_ENV (read from --check), so keep both on one line each.
+BACKUP_ENV=(env -u TMPDIR)
+RESTORE_ENV=(env TMPDIR="$D/tmp")
 
 usage() { sed -n '6,10p' "$0" >&2; exit 2; }
 while [[ $# -gt 0 ]]; do
@@ -81,7 +89,7 @@ esac
 problems=()
 need() { command -v "$1" >/dev/null 2>&1 || problems+=("missing command: $1"); }
 need docker; need python3; need setpriv; need unshare; need sha256sum
-for f in docker-stack-backup.sh docker-stack-restore.sh lib.sh dsb_status.py docker-backup-restic.sh; do
+for f in docker-stack-backup.sh docker-stack-restore.sh lib.sh dsb_status.py docker-backup-restic.sh tests/host/ptrace-probe.py; do
     [[ -f "$REPO/$f" ]] || problems+=("missing $REPO/$f")
 done
 if [[ " ${BACKENDS[*]} " == *" restic "* ]]; then
@@ -99,6 +107,8 @@ fi
 echo "restore-drill: backends=${BACKENDS[*]} probes=$PROBES record=${RECORD_DEST:-no}"
 echo "  scripts from: $REPO ($(sed -n 's/^DSB_VERSION="\(.*\)"/\1/p' "$REPO/lib.sh"))"
 echo "  scratch: $D (removed at the end); compose project: dsb-drill"
+echo "  backup env: ${BACKUP_ENV[*]}"
+echo "  restore env: ${RESTORE_ENV[*]}"
 if [[ "$CHECK_ONLY" == true ]]; then
     if [[ ${#problems[@]} -gt 0 ]]; then
         printf '  not ready: %s\n' "${problems[@]}"
@@ -138,7 +148,23 @@ teardown() {
     # holds every line; then remove the scratch dir and record whether that worked in the
     # results too, where the copy above could not (audit p5b R2-02).
     exec 1>&3 2>&4
-    [[ -n "${TEE_PID:-}" ]] && wait "$TEE_PID" 2>/dev/null
+    # Bounded: anything still holding the transcript pipe (in 0.8.0, a stopped probe
+    # target, #1218) must not hang the drill. After 10 s, tee is killed; the copy may then
+    # miss the last lines, and teardown.txt says so.
+    local tee_note=""
+    if [[ -n "${TEE_PID:-}" ]]; then
+        local i
+        for i in $(seq 1 100); do
+            kill -0 "$TEE_PID" 2>/dev/null || break
+            sleep 0.1
+        done
+        if kill -0 "$TEE_PID" 2>/dev/null; then
+            kill "$TEE_PID" 2>/dev/null
+            tee_note="WARN: transcript pipe still open after 10 s; tee killed, transcript may be incomplete"
+            echo "$tee_note"
+        fi
+        wait "$TEE_PID" 2>/dev/null
+    fi
     if [[ -d "$OUT" ]]; then
         mkdir -p "$RESULTS" && cp -a "$OUT"/. "$RESULTS"/
     fi
@@ -148,6 +174,7 @@ teardown() {
     echo "$cleanup"
     if [[ -d "$RESULTS" ]]; then
         printf 'containers left: %s\n%s\n' "${left:-none}" "$cleanup" > "$RESULTS/teardown.txt"
+        [[ -n "$tee_note" ]] && echo "$tee_note" >> "$RESULTS/teardown.txt"
         [[ -n "${SUDO_USER:-}" ]] && chown -R "$SUDO_USER:" "$RESULTS"
     fi
 }
@@ -161,7 +188,6 @@ trap on_exit EXIT
 [[ -d "$D" && ! -L "$D" && "$(stat -c %u -- "$D")" == 0 ]] || { echo "$D is not root's own directory — not running"; exit 1; }
 chmod 0755 -- "$D"   # RESTIC_RUN_AS must traverse it to reach the scratch repository
 mkdir -p "$OUT" "$D/tmp" "$D/run" "$D/stacks/dsb-drill" "$A" "$D/backups" "$D/safety" "$S"
-export TMPDIR=$D/tmp
 unset BACKUP_BASE
 exec 3>&1 4>&2
 exec > >(tee "$OUT/drill-transcript.txt") 2>&1
@@ -182,7 +208,9 @@ js() { python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eva
 # Scripts, scratch config, scratch restic helper
 #######################################
 cp "$REPO"/{docker-stack-backup.sh,docker-stack-restore.sh,lib.sh,dsb_status.py,backup-verify.sh} "$S/"
+cp "$REPO/tests/host/ptrace-probe.py" "$S/"
 chmod 0755 "$S"/*.sh
+chmod 0644 "$S/ptrace-probe.py"   # run by --probe-user
 cat > "$S/config.sh" <<EOF
 DOCKHAND_BASE=$D/stacks
 DOCKHAND_APPEND_HOSTNAME=false
@@ -274,16 +302,22 @@ probe_restic() {
     check "probes: CapEff = CAP_DAC_READ_SEARCH only" "grep -q '^CapEff:[[:space:]]*0000000000000004$' $OUT/restic-proc-status.txt"
     check "probes: bounding set = CAP_DAC_READ_SEARCH only" "grep -q '^CapBnd:[[:space:]]*0000000000000004$' $OUT/restic-proc-status.txt"
     # Each probe first against a process of the probe user itself: it must work there.
-    setpriv --reuid="$PROBE_USER" --regid="$(id -g -- "$PROBE_USER")" --init-groups -- sleep 30 &
+    # Its output goes to /dev/null so it can never hold the transcript pipe open (#1218).
+    setpriv --reuid="$PROBE_USER" --regid="$(id -g -- "$PROBE_USER")" --init-groups -- sleep 30 >/dev/null 2>&1 &
     local own=$!
     sleep 0.2
     local as_probe=(setpriv --reuid="$PROBE_USER" --regid="$(id -g -- "$PROBE_USER")" --init-groups --)
+    # ptrace-probe.py uses PTRACE_SEIZE: the same access check as PTRACE_ATTACH, but the
+    # target is not stopped (0.8.0 used ATTACH and left this sleep in state T, #1218), and
+    # restic is not stopped either should the negative probe ever succeed.
     check "probes fire: $PROBE_USER reads its own process's environ" "${as_probe[*]} cat /proc/$own/environ >/dev/null"
-    check "probes fire: $PROBE_USER ptraces its own process" "${as_probe[*]} python3 -I -c 'import ctypes,sys; l=ctypes.CDLL(None,use_errno=True); sys.exit(0 if l.ptrace(16,$own,0,0)==0 else 1)'"
-    kill "$own" 2>/dev/null
+    check "probes fire: $PROBE_USER ptraces its own process" "${as_probe[*]} python3 -I $S/ptrace-probe.py $own"
+    check "probes fire: its own process was not left stopped" "[[ \"\$(awk '{print \$3}' /proc/$own/stat 2>/dev/null)\" != [Tt] ]]"
+    kill -KILL "$own" 2>/dev/null
+    wait "$own" 2>/dev/null
     check "probes: $PROBE_USER cannot read restic's /proc/$pid/environ" "! ${as_probe[*]} cat /proc/$pid/environ >/dev/null 2>&1"
     check "probes: $PROBE_USER cannot read restic's fd 0 (the password)" "! ${as_probe[*]} cat /proc/$pid/fd/0 >/dev/null 2>&1"
-    check "probes: $PROBE_USER cannot ptrace restic" "! ${as_probe[*]} python3 -I -c 'import ctypes,sys; l=ctypes.CDLL(None,use_errno=True); sys.exit(0 if l.ptrace(16,$pid,0,0)==0 else 1)'"
+    check "probes: $PROBE_USER cannot ptrace restic" "! ${as_probe[*]} python3 -I $S/ptrace-probe.py $pid"
     # -f: the pattern is read from the file, so the password is never in grep's own argv.
     check "probes: the password is not in restic's argv or environ" "! grep -qFf $H/password /proc/$pid/cmdline /proc/$pid/environ"
 }
@@ -291,12 +325,12 @@ probe_restic() {
 set +e
 echo "=== 3. backup (${BACKENDS[*]}) ==="
 if [[ "$PROBES" == true && " ${BACKENDS[*]} " == *" restic "* ]]; then
-    bash $S/docker-stack-backup.sh > "$OUT/backup-run.txt" 2>&1 &
+    "${BACKUP_ENV[@]}" bash $S/docker-stack-backup.sh > "$OUT/backup-run.txt" 2>&1 &
     bpid=$!
     probe_restic
     wait "$bpid"; brc=$?
 else
-    bash $S/docker-stack-backup.sh > "$OUT/backup-run.txt" 2>&1; brc=$?
+    "${BACKUP_ENV[@]}" bash $S/docker-stack-backup.sh > "$OUT/backup-run.txt" 2>&1; brc=$?
 fi
 echo "backup rc=$brc"
 tail -25 "$OUT/backup-run.txt"
@@ -332,7 +366,7 @@ restore_drill() {   # restore_drill <tar|restic>
     else
         input=$'1\n1\n1\ny\n2\ny\n'
     fi
-    printf '%s' "$input" | bash $S/docker-stack-restore.sh > "$OUT/$b-restore-transcript.txt" 2>&1
+    printf '%s' "$input" | "${RESTORE_ENV[@]}" bash $S/docker-stack-restore.sh > "$OUT/$b-restore-transcript.txt" 2>&1
     local rrc=$?
     cat "$OUT/$b-restore-transcript.txt"
     manifest "$A" > "$OUT/$b-state-restored.txt"; sums "$A" > "$OUT/$b-state-restored.sha256"
@@ -346,7 +380,7 @@ restore_drill() {   # restore_drill <tar|restic>
     check "[$b] safety copy == state B" '[[ -n "$safe" ]] && diff "$OUT/$b-state-B.txt" "$OUT/$b-state-safety.txt" && diff "$OUT/$b-state-B.sha256" "$OUT/$b-state-safety.sha256"'
     check "[$b] container running after restore" '[[ -n "$cid2" ]]'
     check "[$b] compose.yaml restored" '[[ -f $D/stacks/dsb-drill/compose.yaml ]]'
-    check "[$b] no temp extract dir left in TMPDIR" '[[ -z "$(ls -A $TMPDIR)" ]]'
+    check "[$b] no temp extract dir left in $D/tmp" '[[ -z "$(ls -A $D/tmp)" ]]'
 
     echo "=== 6. [$b] negative: nothing changed, nothing stopped ==="
     local cid3; cid3=$(cid)
@@ -356,11 +390,11 @@ restore_drill() {   # restore_drill <tar|restic>
         local bad; bad=$D/backups/$(basename "$(dirname "$(dirname "$ARCH")")")/20991231_235959
         mkdir -p "$bad"; head -c 4096 "$ARCH" > "$bad/$(basename "$ARCH")"
         if [[ " ${BACKENDS[*]} " == *" restic "* ]]; then input=$'1\n1\n1\n1\ny\n2\ny\n'; else input=$'1\n1\n1\ny\n2\ny\n'; fi
-        printf '%s' "$input" | bash $S/docker-stack-restore.sh > "$OUT/$b-negative.txt" 2>&1 || nrc=$?
+        printf '%s' "$input" | "${RESTORE_ENV[@]}" bash $S/docker-stack-restore.sh > "$OUT/$b-negative.txt" 2>&1 || nrc=$?
         rm -rf -- "$bad"
     else
         # An id that is not one of this stack's snapshots: the helper refuses the dump.
-        bash -c 'source "$1/docker-stack-restore.sh"; restore_source=restic selected_stack=dsb-drill
+        "${RESTORE_ENV[@]}" bash -c 'source "$1/docker-stack-restore.sh"; restore_source=restic selected_stack=dsb-drill
             selected_hostname="$(hostname)" selected_restic_id="$2" restore_mode=backup_first
             perform_restore' _ "$S" "$(printf 'ab%.0s' {1..32})" > "$OUT/$b-negative.txt" 2>&1 || nrc=$?
     fi
