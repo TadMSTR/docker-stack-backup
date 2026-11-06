@@ -1,0 +1,21 @@
+# Dependabot configuration (vikunja#1087). Only github-actions: this repo is shell and
+# bats, with no package manifest, and its restic test binary is a sha256-checked download
+# in ci.yml, which Dependabot doesn't track.
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    # From agent-platform-templates repo-scaffolding/baseline/dependabot-github-actions.yml.template.
+    # Actions are SHA-pinned with a trailing version comment. Dependabot bumps the SHA and the
+    # comment together.
+    #
+    # Explicit and sized to this repo: 3 distinct actions across .github/workflows/ as of
+    # 2026-11-06. At the cap Dependabot never raises the next bump, and nothing reports it.
+    # Re-count when a workflow adds an action. No codeql-action, so no codeql groups.
+    open-pull-requests-limit: 3
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
