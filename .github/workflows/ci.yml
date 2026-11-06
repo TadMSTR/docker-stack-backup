@@ -19,7 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: bats-core/bats-action@2104b40bb7b6c2d5110b23a26b0bf265ab8027db # 3.0.0
+      - uses: bats-core/bats-action@42fcc8700f773c075a16a90eb11674c0318ad507 # 3.0.1
       # restic for the restic helper tests: a pinned release, checked against its published
       # SHA256 (tests/helpers/restic.bash finds it through DSB_TEST_RESTIC). Tests that need
       # user namespaces skip on GitHub runners.
